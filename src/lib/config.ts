@@ -10,6 +10,8 @@ export const config = {
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID ?? "sathsangath-9014",
   webhookSecret: process.env.INTAKE_WEBHOOK_SECRET ?? "",
   webLoginUrl: process.env.WEB_LOGIN_URL ?? "https://sathsangath-frontend.vercel.app/login",
+  /** Registration needs an ID proof upload (Aadhaar, or green card / visa / passport for non-Indians). Set REQUIRE_ID_PROOF=false to make it optional. */
+  requireIdProof: process.env.REQUIRE_ID_PROOF !== "false",
   mail: {
     host: process.env.SMTP_HOST ?? "",
     port: Number(process.env.SMTP_PORT ?? 587),
@@ -27,7 +29,7 @@ export const config = {
   },
   brand: {
     name: "Sathsangath",
-    tagline: "Connecting People, Respecting Values",
+    tagline: "Connecting People. Respecting Values.",
     supportEmail: process.env.SUPPORT_EMAIL ?? "support@sathsangath.in",
     supportPhone: process.env.SUPPORT_PHONE ?? "+91 70160 40925",
     whatsapp: process.env.SUPPORT_WHATSAPP ?? "https://wa.me/917016040925",

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
-import { matchesFor, filterOptionsFor, includeTags, mutualIds } from "../lib/matching";
+import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
 import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone } from "../lib/phone";
@@ -123,15 +123,16 @@ memberRouter.get("/matches", wrap(async (req, res) => {
     sort: z.enum(["new", "ageAsc", "ageDesc", "heightAsc", "heightDesc"]).optional(),
   }).parse(req.query);
   const { page: _p, pageSize: _s, ...filters } = q;
-  const [all, mutual, likes] = await Promise.all([
+  const [all, mutual, likes, suggested] = await Promise.all([
     matchesFor(me(req), filters), mutualIds(me(req)),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
+    suggestionsFor(me(req)),
   ]);
   const liked = new Set(likes.map((l) => l.likedId));
   const slice = all.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
   res.json({
     total: all.length, page: q.page, pageSize: q.pageSize,
-    items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id) }))),
+    items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id), suggested: suggested.has(m.id) }))),
   });
 }));
 
@@ -150,12 +151,13 @@ async function loadVisible(viewerId: string, profileId: string) {
 
 memberRouter.get("/profiles/:id", wrap(async (req, res) => {
   const { p, isMutual } = await loadVisible(me(req), String(req.params.id));
-  const [like, intro] = await Promise.all([
+  const [like, intro, sug] = await Promise.all([
     prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
+    prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: me(req), profileId: p.id } } }),
   ]);
   res.json({
-    ...(await (isMutual ? toMutualProfile(p) : toPublicProfile(p))), liked: !!like, mutual: isMutual,
+    ...(await (isMutual ? toMutualProfile(p) : toPublicProfile(p))), liked: !!like, mutual: isMutual, suggested: !!sug, suggestionNote: sug?.note ?? null,
     introduction: intro ? { status: intro.status, label: STATUS_LABEL[intro.status] } : null,
   });
 }));
@@ -199,15 +201,31 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
 }));
 
 memberRouter.get("/likes", wrap(async (req, res) => {
-  const [likes, mutual, intros] = await Promise.all([
+  const [likes, mutual, intros, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, include: { liked: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
     prisma.introRequest.findMany({ where: { requesterId: me(req) } }),
+    suggestionsFor(me(req)),
   ]);
   const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(likes.map(async (l) => {
     const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId);
-    return { ...(await (isMutual ? toMutualProfile(l.liked) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...(await (isMutual ? toMutualProfile(l.liked) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, suggested: suggested.has(l.likedId), likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+  })));
+}));
+
+/** "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first). */
+memberRouter.get("/suggestions", wrap(async (req, res) => {
+  const [rows, likes, mutual, intros] = await Promise.all([
+    prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, include: { profile: { include: includeTags } } }),
+    prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
+    mutualIds(me(req)),
+    prisma.introRequest.findMany({ where: { requesterId: me(req) } }),
+  ]);
+  const liked = new Set(likes.map((l) => l.likedId)); const byTarget = new Map(intros.map((i) => [i.targetId, i]));
+  res.json(await Promise.all(rows.map(async (r) => {
+    const isMutual = mutual.has(r.profileId); const i = byTarget.get(r.profileId);
+    return { ...(await (isMutual ? toMutualProfile(r.profile) : toPublicProfile(r.profile))), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
   })));
 }));
 

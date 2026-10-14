@@ -8,7 +8,7 @@ import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { toAdminMember } from "../lib/serializers";
 import { audit, tempPassword } from "../lib/util";
-import { sendApproved, sendCorrection, sendCredentials, sendRejection } from "../lib/notify";
+import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import { createSubmission, intakeSchema } from "./public";
 import { removeObject, resolveUrl } from "../lib/storage";
@@ -81,13 +81,14 @@ adminRouter.get("/members/export.csv", wrap(async (req, res) => {
 adminRouter.get("/members/:id", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: includeTags });
   if (!m) throw new HttpError(404, "Member not found.");
-  const [likesGiven, likesReceived, intros, overrides] = await Promise.all([
+  const [likesGiven, likesReceived, intros, overrides, suggestions] = await Promise.all([
     prisma.like.findMany({ where: { likerId: m.id }, include: { liked: { select: { id: true, profileCode: true, fullName: true } } } }),
     prisma.like.count({ where: { likedId: m.id } }),
     prisma.introRequest.findMany({ where: { requesterId: m.id }, include: { target: { select: { id: true, profileCode: true, fullName: true } } } }),
     prisma.visibilityOverride.findMany({ where: { viewerId: m.id }, include: { profile: { select: { id: true, profileCode: true, fullName: true } } } }),
+    prisma.suggestion.findMany({ where: { viewerId: m.id }, orderBy: { createdAt: "desc" }, include: { profile: { select: { id: true, profileCode: true, fullName: true, gender: true, city: true, photoUrl: true } } } }),
   ]);
-  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceived, intros, overrides });
+  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceived, intros, overrides, suggestions });
 }));
 
 // Manual entry by admin (walk-in / phone enquiry)
@@ -181,6 +182,48 @@ adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (re
   await prisma.member.delete({ where: { id: pid(req.params.id) } });
   if (doomed) await Promise.all([...doomed.photos.map((p) => removeObject(p.url)), removeObject(doomed.biodataFileUrl)]);
   await audit(adminId(req), "DELETE", "Member", pid(req.params.id));
+  res.json({ ok: true });
+}));
+
+// ID proof (Aadhaar / green card / visa / passport): sensitive, so only SUPER_ADMIN and ADMIN can open it, and every view is logged.
+adminRouter.get("/members/:id/id-proof", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
+  if (!m?.idProofUrl) throw new HttpError(404, "No ID proof uploaded.");
+  await audit(adminId(req), "VIEW_ID_PROOF", "Member", m.id, { type: m.idProofType });
+  res.json({ url: await resolveUrl(m.idProofUrl, 300), type: m.idProofType });
+}));
+
+// ---------- "Suggested by Sathsangath" (super admin / admin hand-picks a bride or groom for a member) ----------
+adminRouter.get("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (_req, res) => {
+  const who = { select: { id: true, profileCode: true, fullName: true, gender: true, city: true } };
+  res.json(await prisma.suggestion.findMany({ orderBy: { createdAt: "desc" }, take: 300, include: { viewer: who, profile: who } }));
+}));
+adminRouter.post("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const d = z.object({ viewerId: z.string().min(1), profile: z.string().trim().min(1, "Enter the profile ID, for example SS-1004"), note: z.string().trim().max(300).optional() }).parse(req.body);
+  const viewer = await prisma.member.findUnique({ where: { id: d.viewerId } });
+  const profile = await prisma.member.findFirst({ where: { OR: [{ id: d.profile }, { profileCode: { equals: d.profile, mode: "insensitive" } }] } });
+  if (!viewer || viewer.status !== "APPROVED") throw new HttpError(422, "The member who receives the suggestion must be an approved member.");
+  if (!profile) throw new HttpError(422, `No profile found with ID "${d.profile}".`, { fields: { profile: "No profile found with this ID" } });
+  if (profile.status !== "APPROVED") throw new HttpError(422, "Only approved profiles can be suggested.", { fields: { profile: "This profile is not approved yet" } });
+  if (profile.id === viewer.id) throw new HttpError(422, "Choose a different member.", { fields: { profile: "A member cannot be suggested to themselves" } });
+  if (profile.gender === viewer.gender) throw new HttpError(422, `${viewer.gender === "MALE" ? "Grooms" : "Brides"} can only be suggested ${viewer.gender === "MALE" ? "brides" : "grooms"}.`, { fields: { profile: "Choose a profile of the opposite gender" } });
+  const existing = await prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: viewer.id, profileId: profile.id } } });
+  const sug = await prisma.suggestion.upsert({
+    where: { viewerId_profileId: { viewerId: viewer.id, profileId: profile.id } },
+    create: { viewerId: viewer.id, profileId: profile.id, note: d.note, adminId: adminId(req) }, update: { note: d.note },
+  });
+  let delivery;
+  if (!existing) {
+    await prisma.notification.create({ data: { audience: "MEMBER", memberId: viewer.id, type: "SUGGESTION", title: "Suggested by Sathsangath",
+      body: `Our team has suggested a profile for you: ${profile.profileCode}. Have a look.`, data: JSON.stringify({ memberId: profile.id }) } });
+    delivery = await sendSuggestion(viewer, profile, d.note);
+  }
+  await audit(adminId(req), "SUGGEST_PROFILE", "Member", viewer.id, { profile: profile.profileCode, note: d.note });
+  res.status(existing ? 200 : 201).json({ id: sug.id, delivery });
+}));
+adminRouter.delete("/suggestions/:id", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const s = await prisma.suggestion.delete({ where: { id: pid(req.params.id) } });
+  await audit(adminId(req), "REMOVE_SUGGESTION", "Member", s.viewerId);
   res.json({ ok: true });
 }));
 

@@ -81,6 +81,12 @@ export async function filterOptionsFor(viewerId: string) {
   };
 }
 
+/** Profiles the admin team suggested to this member, keyed by profile id. */
+export async function suggestionsFor(viewerId: string) {
+  const rows = await prisma.suggestion.findMany({ where: { viewerId }, orderBy: { createdAt: "desc" } });
+  return new Map(rows.map((r) => [r.profileId, r]));
+}
+
 /**
  * Curated feed for one viewer:
  *  - opposite gender, APPROVED only
@@ -100,7 +106,8 @@ async function curatedFeed(viewerId: string) {
   const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId } });
   const overrides = await prisma.visibilityOverride.findMany({ where: { viewerId } });
   const hide = new Set(overrides.filter((o) => o.action === "HIDE").map((o) => o.profileId));
-  const show = new Set(overrides.filter((o) => o.action === "SHOW").map((o) => o.profileId));
+  const suggested = await suggestionsFor(viewerId);
+  const show = new Set([...overrides.filter((o) => o.action === "SHOW").map((o) => o.profileId), ...suggested.keys()]);
 
   const candidates = await prisma.member.findMany({
     where: { status: "APPROVED", id: { not: viewerId }, gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },

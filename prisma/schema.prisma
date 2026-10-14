@@ -72,6 +72,8 @@ model Member {
   createdBy          String?  // Self | Parent | Sibling | Relative (admin-only)
   photoUrl           String?
   biodataFileUrl     String?  // admin-only original document
+  idProofType        String?  // AADHAAR | GREEN_CARD | VISA | PASSPORT | OTHER (private, admin only)
+  idProofUrl         String?  // storage key of the ID proof (private, admin only)
 
   // --- partner preferences (comma separated lists) ---
   prefCommunities    String   @default("")
@@ -97,6 +99,8 @@ model Member {
 
   tags               MemberTag[]
   photos             Photo[]
+  suggestionsReceived Suggestion[] @relation("SuggestionViewer")
+  suggestedTo         Suggestion[] @relation("SuggestionProfile")
   likesGiven         Like[]          @relation("Liker")
   likesReceived      Like[]          @relation("Liked")
   introRequests      IntroRequest[]  @relation("Requester")
@@ -225,4 +229,19 @@ model Notification {
   read      Boolean  @default(false)
   createdAt DateTime @default(now())
   @@index([audience, memberId, read])
+}
+
+// "Suggested by Sathsangath": the admin team hand-picks a bride / groom for a member.
+// The suggested profile always appears for that member (like an admin SHOW rule) and carries a badge.
+model Suggestion {
+  id        String   @id @default(cuid())
+  viewerId  String   // member who receives the suggestion
+  profileId String   // the suggested bride / groom
+  note      String?
+  adminId   String?
+  createdAt DateTime @default(now())
+  viewer    Member   @relation("SuggestionViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+  profile   Member   @relation("SuggestionProfile", fields: [profileId], references: [id], onDelete: Cascade)
+  @@unique([viewerId, profileId])
+  @@index([viewerId])
 }

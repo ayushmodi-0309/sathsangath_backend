@@ -67,9 +67,9 @@ export async function toSelf(m: FullMember) {
 
 /** Full record: admin only. */
 export async function toAdminMember(m: FullMember) {
-  const { passwordHash, ...rest } = m;
+  const { passwordHash, idProofUrl, ...rest } = m;
   return {
-    ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
+    ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
     prefCommunities: list(m.prefCommunities), prefCities: list(m.prefCities),
     tags: (m.tags ?? []).map((t) => ({ id: t.tagValueId, value: t.tagValue.value, category: t.tagValue.category.name })),
   };

@@ -3,11 +3,11 @@ import { LOGO_CID } from "./mailer";
 
 /**
  * Branded email layout (Brand Identity & Guidelines): Pearl Cream background, white card, Midnight Slate
- * headings and buttons, Burnt Rose accent, Champagne Sand details box, Deep Charcoal text.
+ * headings and footer, Burnt Orange (prime colour) for the accent bar, buttons and step markers, Champagne Sand details box, Deep Charcoal text.
  * Table layout + inline styles because that is what Gmail, Outlook and phone mail apps render reliably.
  * Georgia stands in for Cormorant Garamond and Arial for Open Sans (web fonts are not supported in most email apps).
  */
-const C = { pearl: "#F5EFE7", card: "#FFFFFF", midnight: "#26364A", deep: "#1A2636", burnt: "#B85C4A", burntDeep: "#A84E3D", sand: "#E7C8A6", charcoal: "#211F20", muted: "#5B6470", line: "#E3D8CA", sandTint: "#FAF3EA" };
+const C = { pearl: "#FFFFFF", card: "#F5EFE7", midnight: "#26364A", deep: "#1A2636", burnt: "#B85C4A", burntDeep: "#A84E3D", sand: "#E7C8A6", charcoal: "#211F20", muted: "#5B6470", line: "#E3D8CA", sandTint: "#FFFFFF" };
 const SERIF = "Georgia, 'Times New Roman', serif";
 const SANS = "'Open Sans', Arial, Helvetica, sans-serif";
 
@@ -37,13 +37,13 @@ function layout(o: { subject: string; preheader: string; title: string; greeting
   const steps = o.steps?.length ? `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:4px 0 24px;">
       ${o.steps.map((s, i) => `<tr>
-        <td width="36" valign="top" style="padding:6px 0;"><div style="width:26px;height:26px;border-radius:13px;background:${C.midnight};color:${C.pearl};font-family:${SANS};font-size:13px;font-weight:700;line-height:26px;text-align:center;">${i + 1}</div></td>
+        <td width="36" valign="top" style="padding:6px 0;"><div style="width:26px;height:26px;border-radius:13px;background:${C.burnt};color:#FFFFFF;font-family:${SANS};font-size:13px;font-weight:700;line-height:26px;text-align:center;">${i + 1}</div></td>
         <td valign="top" style="padding:6px 0 6px 4px;font-family:${SANS};font-size:15px;line-height:24px;color:${C.charcoal};">${s}</td></tr>`).join("")}
     </table>` : "";
   const cta = o.cta ? `
     <table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 26px;"><tr>
-      <td align="center" bgcolor="${C.midnight}" style="border-radius:999px;">
-        <a href="${esc(o.cta.url)}" target="_blank" style="display:inline-block;padding:14px 32px;font-family:${SANS};font-size:16px;font-weight:700;color:${C.pearl};text-decoration:none;border-radius:999px;">${esc(o.cta.label)}</a>
+      <td align="center" bgcolor="${C.burnt}" style="border-radius:999px;">
+        <a href="${esc(o.cta.url)}" target="_blank" style="display:inline-block;padding:14px 32px;font-family:${SANS};font-size:16px;font-weight:700;color:#FFFFFF;text-decoration:none;border-radius:999px;">${esc(o.cta.label)}</a>
       </td></tr></table>` : "";
   const note = o.note ? `<p style="margin:0 0 8px;font-family:${SANS};font-size:13px;line-height:21px;color:${C.muted};">${o.note}</p>` : "";
 
@@ -159,6 +159,17 @@ export function mutualEmail(m: M, other: { profileCode: string; fullName: string
   });
 }
 
+export function suggestionEmail(m: M, other: { id: string; profileCode: string }, note?: string | null): Email {
+  return layout({
+    subject: "Sathsangath has suggested a profile for you", preheader: `Our team has hand-picked ${other.profileCode} for you.`,
+    title: "A profile suggested for you", greeting: `Namaste ${firstName(m.fullName)},`, textLines: [],
+    paragraphs: [`Our team has personally looked at your preferences and hand-picked a profile we feel could be a good match: <strong>${esc(other.profileCode)}</strong>.`, "Have a look, and if you like it, tap the heart. We will then arrange the introduction with both families."],
+    ...(note ? { box: { quote: note } } : {}),
+    cta: { label: "View the suggested profile", url: `${webBase()}/member/profile/${other.id}` },
+    note: "This is a suggestion from our team. Nothing is shared with the other family until you both agree.",
+  });
+}
+
 /** Short SMS versions (kept under ~160 characters where possible). */
 export const sms = {
   credentials: (m: M, password: string) => `Sathsangath: your bio data is approved. Login ${config.webLoginUrl} | ID ${m.profileCode} | Temp password ${password}. Change it on first login.`,
@@ -166,5 +177,6 @@ export const sms = {
   rejection: () => `Sathsangath: we are unable to take your bio data forward at this time. Please WhatsApp us on ${config.brand.supportPhone} for details.`,
   approved: (m: M) => `Sathsangath: your bio data is approved (ID ${m.profileCode}). Log in with your email at ${config.webLoginUrl} to like profiles.`,
   received: (m: M) => `Sathsangath: we have received your bio data (ref ${m.profileCode}). Our team will review it in 2-3 working days.`,
+  suggestion: (other: { profileCode: string }) => `Sathsangath: our team has suggested a profile for you (${other.profileCode}). Log in to view it: ${config.webLoginUrl}`,
   mutual: (other: { profileCode: string }) => `Sathsangath: it's a match! ${other.profileCode} liked your profile too. Log in to view their profile: ${config.webLoginUrl}`,
 };
