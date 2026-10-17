@@ -4,7 +4,7 @@ import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
 import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
-import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
+import { toContactProfile, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone } from "../lib/phone";
 import { sendMutualMatch } from "../lib/notify";
@@ -151,14 +151,20 @@ async function loadVisible(viewerId: string, profileId: string) {
 
 memberRouter.get("/profiles/:id", wrap(async (req, res) => {
   const { p, isMutual } = await loadVisible(me(req), String(req.params.id));
-  const [like, intro, sug] = await Promise.all([
+  const [like, introByMe, introByThem, sug] = await Promise.all([
     prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
+    prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: p.id, targetId: me(req) } } }),
     prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: me(req), profileId: p.id } } }),
   ]);
+  // Viewer sees contact details when either party's intro request was facilitated
+  const activeIntro = introByMe ?? introByThem;
+  const contactVisible = activeIntro?.status === "INTRODUCTION_FACILITATED";
+  const serialized = contactVisible ? await toContactProfile(p) : isMutual ? await toMutualProfile(p) : await toPublicProfile(p);
   res.json({
-    ...(await (isMutual ? toMutualProfile(p) : toPublicProfile(p))), liked: !!like, mutual: isMutual, suggested: !!sug, suggestionNote: sug?.note ?? null,
-    introduction: intro ? { status: intro.status, label: STATUS_LABEL[intro.status] } : null,
+    ...serialized, liked: !!like, mutual: isMutual, suggested: !!sug, suggestionNote: sug?.note ?? null,
+    introduction: activeIntro ? { status: activeIntro.status, label: STATUS_LABEL[activeIntro.status] } : null,
+    contactVisible,
   });
 }));
 
@@ -195,8 +201,23 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
 }));
 
 memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
-  const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: String(req.params.id) } });
-  if (r.count) { const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } }); await activity(who(m), "REMOVED_LIKE", "Member", String(req.params.id)); }
+  const otherId = String(req.params.id);
+  const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: otherId } });
+  if (r.count) {
+    const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } });
+    await activity(who(m), "REMOVED_LIKE", "Member", otherId);
+    // Close any open intro requests between the two members (mutual access revoked)
+    await prisma.introRequest.updateMany({
+      where: {
+        OR: [
+          { requesterId: me(req), targetId: otherId },
+          { requesterId: otherId, targetId: me(req) },
+        ],
+        status: { not: "CLOSED" },
+      },
+      data: { status: "CLOSED" },
+    });
+  }
   res.json({ liked: false });
 }));
 
@@ -231,12 +252,19 @@ memberRouter.get("/suggestions", wrap(async (req, res) => {
 
 memberRouter.post("/introductions", requireApproved, wrap(async (req, res) => {
   const { profileId, message } = z.object({ profileId: z.string().min(1), message: z.string().trim().max(500).optional() }).parse(req.body);
-  const like = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: profileId } } });
-  if (!like) throw new HttpError(422, "Like this profile first to request an introduction.");
-  const r = await prisma.introRequest.upsert({
-    where: { requesterId_targetId: { requesterId: me(req), targetId: profileId } },
-    create: { requesterId: me(req), targetId: profileId, message }, update: {},
-  });
+  // Mutual like required before either member can request an introduction
+  const mutual = await mutualIds(me(req));
+  if (!mutual.has(profileId)) throw new HttpError(422, "You need a mutual like before requesting an introduction.");
+  const existing = await prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: profileId } } });
+  let r;
+  if (!existing) {
+    r = await prisma.introRequest.create({ data: { requesterId: me(req), targetId: profileId, message } });
+  } else if (existing.status === "CLOSED") {
+    // Re-open after a previous like-revoke cycle
+    r = await prisma.introRequest.update({ where: { id: existing.id }, data: { status: "NEW", message: message ?? null } });
+  } else {
+    r = existing; // already active — idempotent
+  }
   const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } });
   await activity(who(m), "REQUESTED_INTRODUCTION", "IntroRequest", r.id);
   res.status(201).json({ status: r.status, label: STATUS_LABEL[r.status] });

@@ -4,6 +4,7 @@ import { ageFrom, list } from "./util";
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
   photos: { orderBy: [{ isMain: "desc" as const }, { createdAt: "asc" as const }] },
+  membershipPlans: { where: { endDate: { gte: new Date() } }, orderBy: { startDate: "desc" as const }, take: 1 },
 };
 
 /** Ids of members who have liked each other with `memberId` (mutual likes). */

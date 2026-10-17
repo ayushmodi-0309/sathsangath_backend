@@ -37,7 +37,8 @@ const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v =
 
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
 const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a supported country");
-const countryField = countryBase.default("IN");
+// Residence country accepts any non-empty string so members from unlisted countries can still submit.
+const countryField = z.string().trim().min(1).max(100).default("IN");
 const optPhoneRaw = z.string().trim().optional().or(z.literal("").transform(() => undefined));
 
 const intakeBase = z.object({
@@ -147,6 +148,14 @@ const geoLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders:
 publicRouter.get("/cities", geoLimiter, wrap(async (req, res) => {
   const { country, q } = z.object({ country: countryField, q: z.string().trim().default("") }).parse(req.query);
   res.json(searchCities(country as CountryCode, q, 10));
+}));
+
+publicRouter.get("/tags", wrap(async (_req, res) => {
+  const cats = await prisma.tagCategory.findMany({
+    include: { values: { orderBy: { value: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  res.json(cats);
 }));
 
 publicRouter.post("/contact", limiter, wrap(async (req, res) => {

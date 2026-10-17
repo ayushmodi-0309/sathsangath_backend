@@ -107,6 +107,20 @@ model Member {
   introTargets       IntroRequest[]  @relation("Target")
   overridesAsViewer  VisibilityOverride[] @relation("OverrideViewer")
   overridesAsProfile VisibilityOverride[] @relation("OverrideProfile")
+  membershipPlans    MembershipPlan[]
+}
+
+model MembershipPlan {
+  id        String   @id @default(cuid())
+  memberId  String
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  plan      String   // BASIC | PRO
+  startDate DateTime
+  endDate   DateTime
+  note      String?
+  createdBy String?  // admin name/email who assigned it
+  createdAt DateTime @default(now())
+  @@index([memberId])
 }
 
 // Admin-configurable tag system: category (Community, City, Education...) -> values.

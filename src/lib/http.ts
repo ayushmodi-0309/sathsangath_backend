@@ -8,6 +8,21 @@ export class HttpError extends Error {
 export const wrap = (fn: (req: Request, res: Response) => Promise<unknown>): RequestHandler =>
   (req, res, next) => { fn(req, res).catch(next); };
 
+/** Reads ?page, ?pageSize, ?sort, ?order and returns skip/take/sort/order plus the envelope builder. */
+export function paging(req: Request, defaultSize = 20, opts?: { defaultSort?: string; defaultOrder?: "asc" | "desc"; allowedSorts?: string[] }) {
+  const n = (v: unknown, d: number) => { const x = Math.floor(Number(v)); return Number.isFinite(x) && x >= 1 ? x : d; };
+  const page = n(req.query.page, 1);
+  const pageSize = Math.min(n(req.query.pageSize, defaultSize), 100);
+  const { defaultSort = "createdAt", defaultOrder = "desc", allowedSorts } = opts ?? {};
+  const sortRaw = typeof req.query.sort === "string" ? req.query.sort : "";
+  const sort = allowedSorts ? (allowedSorts.includes(sortRaw) ? sortRaw : defaultSort) : (sortRaw || defaultSort);
+  const order: "asc" | "desc" = req.query.order === "asc" ? "asc" : (req.query.order === "desc" ? "desc" : defaultOrder);
+  return {
+    page, pageSize, skip: (page - 1) * pageSize, take: pageSize, sort, order,
+    envelope: <T>(total: number, items: T[]) => ({ total, page, pageSize, sort, order, items }),
+  };
+}
+
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
   if (err instanceof ZodError) {
     const fields: Record<string, string> = {};
