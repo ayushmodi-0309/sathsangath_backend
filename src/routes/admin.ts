@@ -279,6 +279,15 @@ adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
   await audit(adminId(req), "RESEND_CREDENTIALS", "Member", pid(req.params.id), { delivery });
   res.json({ ok: true, delivery });
 }));
+// Generate a new temp password and return it in plaintext so the admin can share it manually.
+// Does NOT send any email/SMS — the admin decides how to deliver it.
+adminRouter.post("/members/:id/reset-password", wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  const pw = tempPassword();
+  await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
+  await audit(adminId(req), "RESET_PASSWORD", "Member", id);
+  res.json({ ok: true, password: pw });
+}));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
   const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });
   await prisma.member.delete({ where: { id: pid(req.params.id) } });
