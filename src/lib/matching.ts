@@ -4,6 +4,7 @@ import { ageFrom, list } from "./util";
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
   photos: { orderBy: [{ isMain: "desc" as const }, { createdAt: "asc" as const }] },
+  membershipPlans: { where: { endDate: { gte: new Date() } }, orderBy: { startDate: "desc" as const }, take: 1 },
 };
 
 /** Ids of members who have liked each other with `memberId` (mutual likes). */
@@ -81,6 +82,12 @@ export async function filterOptionsFor(viewerId: string) {
   };
 }
 
+/** Profiles the admin team suggested to this member, keyed by profile id. */
+export async function suggestionsFor(viewerId: string) {
+  const rows = await prisma.suggestion.findMany({ where: { viewerId }, orderBy: { createdAt: "desc" } });
+  return new Map(rows.map((r) => [r.profileId, r]));
+}
+
 /**
  * Curated feed for one viewer:
  *  - opposite gender, APPROVED only
@@ -100,7 +107,8 @@ async function curatedFeed(viewerId: string) {
   const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId } });
   const overrides = await prisma.visibilityOverride.findMany({ where: { viewerId } });
   const hide = new Set(overrides.filter((o) => o.action === "HIDE").map((o) => o.profileId));
-  const show = new Set(overrides.filter((o) => o.action === "SHOW").map((o) => o.profileId));
+  const suggested = await suggestionsFor(viewerId);
+  const show = new Set([...overrides.filter((o) => o.action === "SHOW").map((o) => o.profileId), ...suggested.keys()]);
 
   const candidates = await prisma.member.findMany({
     where: { status: "APPROVED", id: { not: viewerId }, gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },

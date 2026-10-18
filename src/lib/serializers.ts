@@ -1,8 +1,15 @@
-import type { Member, MemberTag, TagValue, TagCategory, Photo } from "@prisma/client";
+import type { Member, MemberTag, TagValue, TagCategory, Photo, MembershipPlan } from "@prisma/client";
 import { ageFrom, list } from "./util";
 import { resolveUrl } from "./storage";
 
-type FullMember = Member & { tags?: (MemberTag & { tagValue: TagValue & { category: TagCategory } })[]; photos?: Photo[] };
+function activePlan(plans: MembershipPlan[]): MembershipPlan | null {
+  const now = new Date();
+  return plans
+    .filter((p) => p.startDate <= now && p.endDate >= now)
+    .sort((a, b) => b.startDate.getTime() - a.startDate.getTime())[0] ?? null;
+}
+
+type FullMember = Member & { tags?: (MemberTag & { tagValue: TagValue & { category: TagCategory } })[]; photos?: Photo[]; membershipPlans?: MembershipPlan[] };
 const mainOnly = (ps: Photo[]) => { const main = ps.find((p) => p.isMain) ?? ps[0]; return main ? [main] : []; };
 const toPhotos = (m: FullMember) => Promise.all((m.photos ?? []).map(async (p) => ({ id: p.id, url: (await resolveUrl(p.url))!, isMain: p.isMain })));
 
@@ -53,6 +60,13 @@ export const toMutualProfile = async (m: FullMember) => ({
   },
 });
 
+/** After introduction is facilitated by admin: contact details are also revealed. */
+export const toContactProfile = async (m: FullMember) => ({
+  ...(await toMutualProfile(m)),
+  phone: m.phone, email: m.email, familyPhone: m.familyPhone, familyEmail: m.familyEmail,
+  contactVisible: true,
+});
+
 /** A member's own account: includes their own contact details, never admin notes. */
 export async function toSelf(m: FullMember) {
   return {
@@ -67,10 +81,12 @@ export async function toSelf(m: FullMember) {
 
 /** Full record: admin only. */
 export async function toAdminMember(m: FullMember) {
-  const { passwordHash, ...rest } = m;
+  const { passwordHash, idProofUrl, ...rest } = m;
+  const ap = activePlan(m.membershipPlans ?? []);
   return {
-    ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
+    ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
     prefCommunities: list(m.prefCommunities), prefCities: list(m.prefCities),
     tags: (m.tags ?? []).map((t) => ({ id: t.tagValueId, value: t.tagValue.value, category: t.tagValue.category.name })),
+    currentPlan: ap ? { id: ap.id, plan: ap.plan, startDate: ap.startDate, endDate: ap.endDate, note: ap.note } : null,
   };
 }

@@ -23,10 +23,10 @@ Change `JWT_SECRET` and the admin password before going live.
 
 ## Endpoints (`/api/v1`)
 
-- **public**: `POST /public/biodata` (multipart, `photo` + `biodata` files), `POST /public/intake-webhook` (Google Form, header `x-webhook-secret`), `POST /public/contact`
+- **public**: `POST /public/biodata` (multipart: `photo`, `biodata`, and `idproof` + `idProofType` = AADHAAR | GREEN_CARD | VISA | PASSPORT | OTHER; required unless `REQUIRE_ID_PROOF=false`), `POST /public/intake-webhook` (Google Form, header `x-webhook-secret`), `POST /public/contact`
 - **auth**: `POST /auth/login`, `POST /auth/change-password`, `POST /auth/admin/login`, `GET /auth/admin/me`
-- **member** (token, approved members only): `GET /member/me`, `PATCH /member/me`, `GET /member/matches?page=`, `GET /member/profiles/:id`, `PUT|DELETE /member/likes/:id`, `GET /member/likes`, `POST /member/introductions`, `GET|POST /member/photos`, `PATCH /member/photos/:id/main`, `DELETE /member/photos/:id`, `GET /member/notifications`, `GET /member/announcements`
-- **admin** (token): dashboard, members (list/filter/export.csv/edit), approve / correction / reject / suspend / reactivate / resend-credentials, tags, visibility overrides, likes, introductions, mutual-like notifications, announcements, messages, activity log (all roles), staff
+- **member** (token, approved members only): `GET /member/me`, `PATCH /member/me`, `GET /member/matches?page=`, `GET /member/profiles/:id`, `PUT|DELETE /member/likes/:id`, `GET /member/likes`, `POST /member/introductions`, `GET|POST /member/photos`, `PATCH /member/photos/:id/main`, `DELETE /member/photos/:id`, `GET /member/notifications`, `GET /member/announcements`, `GET /member/suggestions`
+- **admin** (token): dashboard, members (list/filter/export.csv/edit), approve / correction / reject / suspend / reactivate / resend-credentials, tags, visibility overrides, likes, introductions, mutual-like notifications, announcements, messages, activity log (all roles), staff, **suggestions** (`POST/DELETE /admin/suggestions`, "Suggested by Sathsangath", SUPER_ADMIN/ADMIN only), **ID proof** (`GET /admin/members/:id/id-proof`, SUPER_ADMIN/ADMIN only, every view is logged)
 
 Errors: `{ "error": "message", "fields": { "phone": "..." } }` (HTTP 422 for validation).
 
@@ -52,3 +52,9 @@ Every important event sends a branded email (logo, brand colours) and an SMS: **
 - **SMS** uses Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_FROM` or `TWILIO_MESSAGING_SERVICE_SID`). Until these are filled in, SMS runs in *console mode*: the text is printed in the server log and the admin screen says nothing was sent. For India, sending to Indian numbers needs a DLT-registered sender and templates (Twilio or MSG91 will walk you through it).
 - Templates live in `src/lib/email-templates.ts`; the logo is embedded from `src/assets/email/`.
 - `npm run mail:check` verifies the SMTP login and writes previews to `email-previews/`. `npm run mail:check -- you@example.com` also sends one real test email.
+
+
+## ID proof and suggestions
+
+- **ID proof:** Indian citizens upload an Aadhaar card; everyone else uploads a green card, visa, passport or other residence permit. The file goes to private storage under `docs/`; only SUPER_ADMIN and ADMIN can open it (short-lived link), it is never part of any member-facing response, and each view is written to the activity log.
+- **Suggested by Sathsangath:** an admin hand-picks a bride or groom for a member (`POST /admin/suggestions`). The suggested profile always appears for that member (it works like an admin SHOW rule), carries a "Suggested by Sathsangath" tag, and the member gets an in-app notification plus email and SMS.

@@ -1,6 +1,6 @@
 import { sendMail, type Delivery } from "./mailer";
 import { sendSms } from "./sms";
-import { approvedEmail, correctionEmail, credentialsEmail, mutualEmail, receivedEmail, rejectionEmail, sms, type Email } from "./email-templates";
+import { approvedEmail, correctionEmail, credentialsEmail, mutualEmail, receivedEmail, rejectionEmail, suggestionEmail, sms, type Email } from "./email-templates";
 
 /**
  * High-level notifications. Each one sends an email (branded template) and an SMS to the member,
@@ -23,3 +23,5 @@ export const sendCorrection = (m: M, note: string) => both(m, correctionEmail(m,
 export const sendRejection = (m: M) => both(m, rejectionEmail(m), sms.rejection());
 export const sendSubmissionReceived = (m: M) => both(m, receivedEmail(m), sms.received(m));
 export const sendMutualMatch = (m: M, other: { id: string; profileCode: string; fullName: string }) => both(m, mutualEmail(m, other), sms.mutual(other));
+
+export const sendSuggestion = (m: M, other: { id: string; profileCode: string }, note?: string | null) => both(m, suggestionEmail(m, other, note), sms.suggestion(other));

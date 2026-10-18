@@ -3,15 +3,16 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/db";
-import { HttpError, wrap } from "../lib/http";
+import { HttpError, paging, wrap } from "../lib/http";
 import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { toAdminMember } from "../lib/serializers";
 import { audit, tempPassword } from "../lib/util";
-import { sendApproved, sendCorrection, sendCredentials, sendRejection } from "../lib/notify";
+import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
-import { createSubmission, intakeSchema } from "./public";
-import { removeObject, resolveUrl } from "../lib/storage";
+import multer from "multer";
+import { createSubmission, intakeSchema, MAX_PHOTO_BYTES } from "./public";
+import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin());
@@ -36,11 +37,38 @@ adminRouter.get("/dashboard", wrap(async (_req, res) => {
 }));
 
 // ---------- Members / submissions ----------
+const tri = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const listQuery = z.object({
+  // existing
   status: z.string().optional(), q: z.string().trim().optional(), gender: z.string().optional(),
   city: z.string().optional(), community: z.string().optional(), tag: z.string().optional(),
-  ageMin: z.coerce.number().optional(), ageMax: z.coerce.number().optional(),
+  ageMin: z.coerce.number().int().min(0).optional(), ageMax: z.coerce.number().int().min(0).optional(),
+  // new
+  maritalStatus: z.string().optional(),
+  heightMin: z.coerce.number().int().min(0).optional(),
+  heightMax: z.coerce.number().int().min(0).optional(),
+  education: z.string().optional(),
+  profession: z.string().optional(),
+  income: z.string().optional(),
+  diet: z.string().optional(),
+  state: z.string().optional(),
+  country: z.string().optional(),
+  nativePlace: z.string().optional(),
+  religion: z.string().optional(),
+  motherTongue: z.string().optional(),
+  familyType: z.string().optional(),
+  subCommunity: z.string().optional(),
+  source: z.string().optional(),
+  createdBy: z.string().optional(),
+  hasPhoto: z.enum(["true", "false"]).optional(),
+  hasIdProof: z.enum(["true", "false"]).optional(),
+  hasAccount: z.enum(["true", "false"]).optional(),
+  expiringSoon: z.enum(["true"]).optional(),
+  plan: z.enum(["FREE", "BASIC", "PRO"]).optional(),
+  // pagination + sort
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  sort: z.enum(["profileCode","fullName","dob","city","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
+  order: z.enum(["asc","desc"]).default("desc"),
 });
 function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   const w: Prisma.MemberWhereInput = {};
@@ -53,17 +81,48 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   const now = new Date();
   if (q.ageMin) w.dob = { ...(w.dob as object), lte: new Date(now.getFullYear() - q.ageMin, now.getMonth(), now.getDate()) };
   if (q.ageMax) w.dob = { ...(w.dob as object), gte: new Date(now.getFullYear() - q.ageMax - 1, now.getMonth(), now.getDate()) };
+  // new
+  if (q.maritalStatus) w.maritalStatus = q.maritalStatus;
+  if (q.heightMin) w.heightCm = { ...(w.heightCm as object), gte: q.heightMin };
+  if (q.heightMax) w.heightCm = { ...(w.heightCm as object), lte: q.heightMax };
+  if (q.education)    w.education = { contains: q.education, mode: "insensitive" };
+  if (q.profession)   w.profession = { contains: q.profession, mode: "insensitive" };
+  if (q.income)       w.income = { contains: q.income, mode: "insensitive" };
+  if (q.diet)         w.diet = q.diet;
+  if (q.state)        w.state = { contains: q.state, mode: "insensitive" };
+  if (q.country)      w.country = q.country;
+  if (q.nativePlace)  w.nativePlace = { contains: q.nativePlace, mode: "insensitive" };
+  if (q.religion)     w.religion = { contains: q.religion, mode: "insensitive" };
+  if (q.motherTongue) w.motherTongue = { contains: q.motherTongue, mode: "insensitive" };
+  if (q.familyType)   w.familyType = q.familyType;
+  if (q.subCommunity) w.subCommunity = { contains: q.subCommunity, mode: "insensitive" };
+  if (q.source)       w.source = q.source;
+  if (q.createdBy)    w.createdBy = q.createdBy;
+  if (q.hasPhoto === "true")  w.photoUrl = { not: null };
+  if (q.hasPhoto === "false") w.photoUrl = null;
+  if (q.hasIdProof === "true")  w.idProofUrl = { not: null };
+  if (q.hasIdProof === "false") w.idProofUrl = null;
+  if (q.hasAccount === "true")  w.accountId = { not: null };
+  if (q.hasAccount === "false") w.accountId = null;
+  if (q.expiringSoon === "true") {
+    const in30 = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    w.membershipPlans = { some: { endDate: { lte: in30, gte: new Date() } } };
+  }
+  if (q.plan === "FREE") w.membershipPlans = { none: { endDate: { gte: new Date() } } };
+  if (q.plan === "BASIC") w.membershipPlans = { some: { plan: "BASIC", endDate: { gte: new Date() } } };
+  if (q.plan === "PRO")   w.membershipPlans = { some: { plan: "PRO",   endDate: { gte: new Date() } } };
   return w;
 }
+void tri; // suppress unused warning — may be used in future
 
 adminRouter.get("/members", wrap(async (req, res) => {
   const q = listQuery.parse(req.query);
   const where = buildWhere(q);
   const [total, rows] = await Promise.all([
     prisma.member.count({ where }),
-    prisma.member.findMany({ where, include: includeTags, orderBy: { createdAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
+    prisma.member.findMany({ where, include: includeTags, orderBy: { [q.sort]: q.order } as Record<string, "asc"|"desc">, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
   ]);
-  res.json({ total, page: q.page, pageSize: q.pageSize, items: await Promise.all(rows.map(toAdminMember)) });
+  res.json({ total, page: q.page, pageSize: q.pageSize, sort: q.sort, order: q.order, items: await Promise.all(rows.map(toAdminMember)) });
 }));
 
 adminRouter.get("/members/export.csv", wrap(async (req, res) => {
@@ -81,20 +140,53 @@ adminRouter.get("/members/export.csv", wrap(async (req, res) => {
 adminRouter.get("/members/:id", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: includeTags });
   if (!m) throw new HttpError(404, "Member not found.");
-  const [likesGiven, likesReceived, intros, overrides] = await Promise.all([
-    prisma.like.findMany({ where: { likerId: m.id }, include: { liked: { select: { id: true, profileCode: true, fullName: true } } } }),
-    prisma.like.count({ where: { likedId: m.id } }),
-    prisma.introRequest.findMany({ where: { requesterId: m.id }, include: { target: { select: { id: true, profileCode: true, fullName: true } } } }),
+  const profileSnap = { id: true, profileCode: true, fullName: true, city: true, status: true, photoUrl: true } as const;
+  const [likesGiven, likesReceivedList, intros, introsReceived, overrides, suggestions] = await Promise.all([
+    prisma.like.findMany({ where: { likerId: m.id }, orderBy: { createdAt: "desc" }, include: { liked: { select: profileSnap } } }),
+    prisma.like.findMany({ where: { likedId: m.id }, orderBy: { createdAt: "desc" }, include: { liker: { select: profileSnap } } }),
+    prisma.introRequest.findMany({ where: { requesterId: m.id }, orderBy: { createdAt: "desc" }, include: { target: { select: profileSnap } } }),
+    prisma.introRequest.findMany({ where: { targetId: m.id }, orderBy: { createdAt: "desc" }, include: { requester: { select: profileSnap } } }),
     prisma.visibilityOverride.findMany({ where: { viewerId: m.id }, include: { profile: { select: { id: true, profileCode: true, fullName: true } } } }),
+    prisma.suggestion.findMany({ where: { viewerId: m.id }, orderBy: { createdAt: "desc" }, include: { profile: { select: { id: true, profileCode: true, fullName: true, gender: true, city: true, photoUrl: true } } } }),
   ]);
-  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceived, intros, overrides });
+  // Compute "liked back" flags for each suggestion without N+1 queries
+  const sugProfileIds = suggestions.map((s) => s.profileId);
+  const [viewerLikedSet, profileLikedSet] = sugProfileIds.length ? await Promise.all([
+    prisma.like.findMany({ where: { likerId: m.id, likedId: { in: sugProfileIds } }, select: { likedId: true } }).then((r) => new Set(r.map((x) => x.likedId))),
+    prisma.like.findMany({ where: { likerId: { in: sugProfileIds }, likedId: m.id }, select: { likerId: true } }).then((r) => new Set(r.map((x) => x.likerId))),
+  ]) : [new Set<string>(), new Set<string>()];
+  const suggestionsWithFlags = suggestions.map((s) => ({ ...s, viewerLiked: viewerLikedSet.has(s.profileId), profileLiked: profileLikedSet.has(s.profileId) }));
+  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceivedList, likesReceived: likesReceivedList.length, intros, introsReceived, overrides, suggestions: suggestionsWithFlags });
 }));
 
-// Manual entry by admin (walk-in / phone enquiry)
-adminRouter.post("/members", wrap(async (req, res) => {
-  const m = await createSubmission(intakeSchema.parse({ consent: true, ...req.body }), "ADMIN");
-  await audit(adminId(req), "CREATE", "Member", m.id);
-  res.status(201).json({ id: m.id, profileCode: m.profileCode });
+// Manual entry by admin (walk-in / phone enquiry): same fields and file rules as the public form, lands as PENDING.
+const ADMIN_ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
+const adminUpload = multer({
+  storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 5 },
+  fileFilter: (_r, f, cb) => (ADMIN_ALLOWED.has(f.mimetype) ? cb(null, true) : cb(new HttpError(422, "Only JPG, PNG, WebP or PDF files are allowed."))),
+});
+adminRouter.post("/members", adminUpload.fields([{ name: "photo", maxCount: 3 }, { name: "biodata", maxCount: 1 }, { name: "idproof", maxCount: 1 }]), wrap(async (req, res) => {
+  const input = intakeSchema.parse({ ...req.body, consent: true });
+  const f = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const photos = f?.photo ?? [];
+  if (!photos.length) throw new HttpError(422, "Please add at least one photo.", { fields: { photos: "Please add at least one photo" } });
+  const big = photos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
+  if (big) throw new HttpError(422, "Photos must be JPG, PNG or WebP and 5 MB or smaller.", { fields: { photos: "Photos must be JPG, PNG or WebP and 5 MB or smaller" } });
+  if (config.requireIdProof && !f?.idproof?.[0]) throw new HttpError(422, "Please upload the ID proof.", { fields: { idProof: "Please upload the ID proof" } });
+  if (f?.idproof?.[0] && !input.idProofType) throw new HttpError(422, "Choose the type of ID proof.", { fields: { idProofType: "Choose the type of ID proof" } });
+  const photoUrls: string[] = [];
+  let biodataFileUrl: string | undefined, idProofUrl: string | undefined;
+  try {
+    for (const p of photos) photoUrls.push(await saveUpload("photos", p));
+    if (f?.biodata?.[0]) biodataFileUrl = await saveUpload("docs", f.biodata[0]);
+    if (f?.idproof?.[0]) idProofUrl = await saveUpload("docs", f.idproof[0]);
+    const m = await createSubmission(input, "ADMIN", { photoUrls, biodataFileUrl, idProofUrl });
+    await audit(adminId(req), "CREATE", "Member", m.id);
+    res.status(201).json({ id: m.id, profileCode: m.profileCode });
+  } catch (e) {
+    await Promise.all([...photoUrls.map((u) => removeObject(u)), removeObject(biodataFileUrl), removeObject(idProofUrl)]); // e.g. duplicate phone: don't orphan files
+    throw e;
+  }
 }));
 
 const editSchema = z.object({
@@ -166,6 +258,17 @@ adminRouter.post("/members/:id/suspend", wrap(async (req, res) => {
   await audit(adminId(req), "SUSPEND", "Member", pid(req.params.id), { note });
   res.json({ ok: true });
 }));
+// Undo an approval made by mistake: back to PENDING (hidden from matching, re-reviewable). Unlike suspend, the member is not locked out as an account.
+adminRouter.post("/members/:id/restrict", wrap(async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().optional() }).parse(req.body ?? {});
+  const id = pid(req.params.id);
+  const cur = await prisma.member.findUnique({ where: { id }, select: { status: true } });
+  if (!cur) throw new HttpError(404, "Member not found.");
+  if (cur.status !== "APPROVED") throw new HttpError(409, "Only an approved profile can be restricted.");
+  await prisma.member.update({ where: { id }, data: { status: "PENDING", approvedAt: null, adminNote: null } });
+  await audit(adminId(req), "RESTRICT", "Member", id, { note });
+  res.json({ ok: true });
+}));
 adminRouter.post("/members/:id/reactivate", wrap(async (req, res) => {
   await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "APPROVED", adminNote: null } });
   await audit(adminId(req), "REACTIVATE", "Member", pid(req.params.id));
@@ -176,18 +279,119 @@ adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
   await audit(adminId(req), "RESEND_CREDENTIALS", "Member", pid(req.params.id), { delivery });
   res.json({ ok: true, delivery });
 }));
+// Generate a new temp password and return it in plaintext so the admin can share it manually.
+// Does NOT send any email/SMS — the admin decides how to deliver it.
+adminRouter.post("/members/:id/reset-password", wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  const pw = tempPassword();
+  await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
+  await audit(adminId(req), "RESET_PASSWORD", "Member", id);
+  res.json({ ok: true, password: pw });
+}));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
   const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });
   await prisma.member.delete({ where: { id: pid(req.params.id) } });
-  if (doomed) await Promise.all([...doomed.photos.map((p) => removeObject(p.url)), removeObject(doomed.biodataFileUrl)]);
+  if (doomed) await Promise.all([...doomed.photos.map((p) => removeObject(p.url)), removeObject(doomed.biodataFileUrl), removeObject(doomed.idProofUrl)]);
   await audit(adminId(req), "DELETE", "Member", pid(req.params.id));
   res.json({ ok: true });
+}));
+
+// ID proof (Aadhaar / green card / visa / passport): sensitive, so only SUPER_ADMIN and ADMIN can open it, and every view is logged.
+adminRouter.get("/members/:id/id-proof", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
+  if (!m?.idProofUrl) throw new HttpError(404, "No ID proof uploaded.");
+  await audit(adminId(req), "VIEW_ID_PROOF", "Member", m.id, { type: m.idProofType });
+  res.json({ url: await resolveUrl(m.idProofUrl, 300), type: m.idProofType });
+}));
+
+// ---------- "Suggested by Sathsangath" (super admin / admin hand-picks a bride or groom for a member) ----------
+adminRouter.get("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const who = { select: { id: true, profileCode: true, fullName: true, gender: true, city: true } };
+  const pg = paging(req, 20, { allowedSorts: ["createdAt"] });
+  const [total, rows] = await Promise.all([
+    prisma.suggestion.count(),
+    prisma.suggestion.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { viewer: who, profile: who } }),
+  ]);
+  res.json(pg.envelope(total, rows));
+}));
+adminRouter.post("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const d = z.object({ viewerId: z.string().min(1), profile: z.string().trim().min(1, "Enter the profile ID, for example SS-1004"), note: z.string().trim().max(300).optional() }).parse(req.body);
+  const viewer = await prisma.member.findUnique({ where: { id: d.viewerId } });
+  const profile = await prisma.member.findFirst({ where: { OR: [{ id: d.profile }, { profileCode: { equals: d.profile, mode: "insensitive" } }] } });
+  if (!viewer || viewer.status !== "APPROVED") throw new HttpError(422, "The member who receives the suggestion must be an approved member.");
+  if (!profile) throw new HttpError(422, `No profile found with ID "${d.profile}".`, { fields: { profile: "No profile found with this ID" } });
+  if (profile.status !== "APPROVED") throw new HttpError(422, "Only approved profiles can be suggested.", { fields: { profile: "This profile is not approved yet" } });
+  if (profile.id === viewer.id) throw new HttpError(422, "Choose a different member.", { fields: { profile: "A member cannot be suggested to themselves" } });
+  if (profile.gender === viewer.gender) throw new HttpError(422, `${viewer.gender === "MALE" ? "Grooms" : "Brides"} can only be suggested ${viewer.gender === "MALE" ? "brides" : "grooms"}.`, { fields: { profile: "Choose a profile of the opposite gender" } });
+  const existing = await prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: viewer.id, profileId: profile.id } } });
+  const sug = await prisma.suggestion.upsert({
+    where: { viewerId_profileId: { viewerId: viewer.id, profileId: profile.id } },
+    create: { viewerId: viewer.id, profileId: profile.id, note: d.note, adminId: adminId(req) }, update: { note: d.note },
+  });
+  let delivery;
+  if (!existing) {
+    await prisma.notification.create({ data: { audience: "MEMBER", memberId: viewer.id, type: "SUGGESTION", title: "Suggested by Sathsangath",
+      body: `Our team has suggested a profile for you: ${profile.profileCode}. Have a look.`, data: JSON.stringify({ memberId: profile.id }) } });
+    delivery = await sendSuggestion(viewer, profile, d.note);
+  }
+  await audit(adminId(req), "SUGGEST_PROFILE", "Member", viewer.id, { profile: profile.profileCode, note: d.note });
+  res.status(existing ? 200 : 201).json({ id: sug.id, delivery });
+}));
+adminRouter.delete("/suggestions/:id", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const s = await prisma.suggestion.delete({ where: { id: pid(req.params.id) } });
+  await audit(adminId(req), "REMOVE_SUGGESTION", "Member", s.viewerId);
+  res.json({ ok: true });
+}));
+adminRouter.patch("/suggestions/:id", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().max(300).optional().or(z.literal("").transform(() => undefined)) }).parse(req.body);
+  const s = await prisma.suggestion.update({ where: { id: pid(req.params.id) }, data: { note: note ?? null } });
+  res.json({ ok: true, id: s.id, note: s.note });
 }));
 
 adminRouter.get("/members/:id/document", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
   if (!m?.biodataFileUrl) throw new HttpError(404, "No document uploaded.");
   res.json({ url: await resolveUrl(m.biodataFileUrl, 300) });
+}));
+
+// ---------- Membership ----------
+const membershipSchema = z.object({
+  plan:      z.enum(["BASIC", "PRO"]),
+  startDate: z.string().datetime(),
+  endDate:   z.string().datetime(),
+  note:      z.string().trim().max(300).optional(),
+});
+
+adminRouter.get("/members/:id/membership", wrap(async (req, res) => {
+  const rows = await prisma.membershipPlan.findMany({
+    where: { memberId: pid(req.params.id) },
+    orderBy: { startDate: "desc" },
+  });
+  res.json(rows);
+}));
+
+adminRouter.post("/members/:id/membership", wrap(async (req, res) => {
+  const d = membershipSchema.parse(req.body);
+  const memberId = pid(req.params.id);
+  const m = await prisma.member.findUnique({ where: { id: memberId } });
+  if (!m) throw new HttpError(404, "Member not found.");
+  const start = new Date(d.startDate);
+  const end   = new Date(d.endDate);
+  if (end <= start) throw new HttpError(422, "End date must be after start date.");
+  const admin = await prisma.adminUser.findUnique({ where: { id: adminId(req) }, select: { name: true } });
+  const row = await prisma.membershipPlan.create({
+    data: { memberId, plan: d.plan, startDate: start, endDate: end, note: d.note, createdBy: admin?.name },
+  });
+  await audit(adminId(req), "ASSIGN_MEMBERSHIP", "Member", memberId, { plan: d.plan, startDate: d.startDate, endDate: d.endDate });
+  res.status(201).json(row);
+}));
+
+adminRouter.delete("/members/:id/membership/:planId", wrap(async (req, res) => {
+  const row = await prisma.membershipPlan.findUnique({ where: { id: pid(req.params.planId) } });
+  if (!row || row.memberId !== pid(req.params.id)) throw new HttpError(404, "Membership plan not found.");
+  await prisma.membershipPlan.delete({ where: { id: row.id } });
+  await audit(adminId(req), "REMOVE_MEMBERSHIP", "Member", pid(req.params.id), { planId: row.id });
+  res.json({ ok: true });
 }));
 
 // ---------- Tags ----------
@@ -224,15 +428,26 @@ adminRouter.put("/overrides", wrap(async (req, res) => {
 adminRouter.delete("/overrides/:id", wrap(async (req, res) => { await prisma.visibilityOverride.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
 
 // ---------- Likes & introduction requests ----------
-adminRouter.get("/likes", wrap(async (_req, res) => {
-  res.json(await prisma.like.findMany({ orderBy: { createdAt: "desc" }, take: 200, include: { liker: { select: { id: true, profileCode: true, fullName: true, phone: true } }, liked: { select: { id: true, profileCode: true, fullName: true, phone: true } } } }));
+adminRouter.get("/likes", wrap(async (req, res) => {
+  const pg = paging(req, 20, { allowedSorts: ["createdAt"] });
+  const [total, rows] = await Promise.all([
+    prisma.like.count(),
+    prisma.like.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { liker: { select: { id: true, profileCode: true, fullName: true, phone: true } }, liked: { select: { id: true, profileCode: true, fullName: true, phone: true } } } }),
+  ]);
+  res.json(pg.envelope(total, rows));
 }));
 adminRouter.get("/introductions", wrap(async (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
-  res.json(await prisma.introRequest.findMany({
-    where: status ? { status } : {}, orderBy: { createdAt: "desc" },
-    include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } } },
-  }));
+  const pg = paging(req, 20, { allowedSorts: ["createdAt", "status"] });
+  const where = status ? { status } : {};
+  const [total, rows] = await Promise.all([
+    prisma.introRequest.count({ where }),
+    prisma.introRequest.findMany({
+      where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take,
+      include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } } },
+    }),
+  ]);
+  res.json(pg.envelope(total, rows));
 }));
 adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
   const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);
@@ -242,12 +457,20 @@ adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
 }));
 
 // ---------- Messages, blog, content, audit ----------
-adminRouter.get("/messages", wrap(async (_req, res) => { res.json(await prisma.contactMessage.findMany({ orderBy: { createdAt: "desc" }, take: 200 })); }));
+adminRouter.get("/messages", wrap(async (req, res) => {
+  const pg = paging(req, 20, { allowedSorts: ["createdAt", "name", "handled"] });
+  const [total, rows] = await Promise.all([prisma.contactMessage.count(), prisma.contactMessage.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take })]);
+  res.json(pg.envelope(total, rows));
+}));
 adminRouter.patch("/messages/:id", wrap(async (req, res) => { res.json(await prisma.contactMessage.update({ where: { id: pid(req.params.id) }, data: { handled: !!req.body.handled } })); }));
 
 // ---------- Announcements (members see these in their panel) ----------
 const announcementSchema = z.object({ title: z.string().trim().min(3, "Enter a title"), body: z.string().trim().min(5, "Write the announcement"), active: z.boolean().default(true) });
-adminRouter.get("/announcements", wrap(async (_req, res) => { res.json(await prisma.announcement.findMany({ orderBy: { createdAt: "desc" } })); }));
+adminRouter.get("/announcements", wrap(async (req, res) => {
+  const pg = paging(req, 20, { allowedSorts: ["createdAt", "title", "active"] });
+  const [total, rows] = await Promise.all([prisma.announcement.count(), prisma.announcement.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take })]);
+  res.json(pg.envelope(total, rows));
+}));
 adminRouter.post("/announcements", wrap(async (req, res) => {
   const d = announcementSchema.parse(req.body);
   const a = await prisma.announcement.create({ data: d });
@@ -270,22 +493,29 @@ adminRouter.delete("/announcements/:id", wrap(async (req, res) => {
 }));
 
 // ---------- Admin notifications (mutual likes) ----------
-adminRouter.get("/notifications", wrap(async (_req, res) => {
-  const rows = await prisma.notification.findMany({ where: { audience: "ADMIN" }, orderBy: { createdAt: "desc" }, take: 200 });
+adminRouter.get("/notifications", wrap(async (req, res) => {
+  const pg = paging(req, 20, { allowedSorts: ["createdAt", "read"] });
+  const [total, rows] = await Promise.all([
+    prisma.notification.count({ where: { audience: "ADMIN" } }),
+    prisma.notification.findMany({ where: { audience: "ADMIN" }, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take }),
+  ]);
   const ids = [...new Set(rows.flatMap((n) => { try { const d = JSON.parse(n.data ?? "{}"); return [d.a, d.b]; } catch { return []; } }).filter(Boolean))] as string[];
   const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
   const byId = new Map(await Promise.all(people.map(async (p) => [p.id, { ...p, photoUrl: await resolveUrl(p.photoUrl) }] as const)));
-  res.json(rows.map((n) => { let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {} return { ...n, a: byId.get(d.a ?? "") ?? null, b: byId.get(d.b ?? "") ?? null }; }));
+  res.json(pg.envelope(total, rows.map((n) => { let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {} return { ...n, a: byId.get(d.a ?? "") ?? null, b: byId.get(d.b ?? "") ?? null }; })));
 }));
 adminRouter.post("/notifications/read-all", wrap(async (_req, res) => { await prisma.notification.updateMany({ where: { audience: "ADMIN", read: false }, data: { read: true } }); res.json({ ok: true }); }));
 adminRouter.patch("/notifications/:id", wrap(async (req, res) => { await prisma.notification.update({ where: { id: pid(req.params.id) }, data: { read: true } }); res.json({ ok: true }); }));
 
 adminRouter.get("/audit", wrap(async (req, res) => {
   const t = typeof req.query.actor === "string" ? req.query.actor : "";
-  const rows = await prisma.auditLog.findMany({
-    where: t ? { actorType: t } : {}, orderBy: { createdAt: "desc" }, take: 300, include: { admin: { select: { name: true } } },
-  });
-  res.json(rows.map((l) => ({ id: l.id, actorType: l.actorType, actor: l.admin?.name ?? l.actorName ?? (l.actorType === "PUBLIC" ? "Website visitor" : "System"), action: l.action, entity: l.entity, entityId: l.entityId, detail: l.detail, createdAt: l.createdAt })));
+  const pg = paging(req, 20, { allowedSorts: ["createdAt", "actorType", "action"] });
+  const where = t ? { actorType: t } : {};
+  const [total, rows] = await Promise.all([
+    prisma.auditLog.count({ where }),
+    prisma.auditLog.findMany({ where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { admin: { select: { name: true } } } }),
+  ]);
+  res.json(pg.envelope(total, rows.map((l) => ({ id: l.id, actorType: l.actorType, actor: l.admin?.name ?? l.actorName ?? (l.actorType === "PUBLIC" ? "Website visitor" : "System"), action: l.action, entity: l.entity, entityId: l.entityId, detail: l.detail, createdAt: l.createdAt }))));
 }));
 
 // ---------- Staff ----------

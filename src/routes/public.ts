@@ -17,7 +17,7 @@ const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/p
 // Files are buffered in memory and handed to the storage provider (see lib/storage); nothing touches local disk.
 const storage = multer.memoryStorage();
 export const upload = multer({
-  storage, limits: { fileSize: 8 * 1024 * 1024, files: 4 },
+  storage, limits: { fileSize: 8 * 1024 * 1024, files: 3 },
   fileFilter: (_r, f, cb) => (ALLOWED.has(f.mimetype) ? cb(null, true) : cb(new HttpError(422, "Only JPG, PNG, WebP or PDF files are allowed."))),
 });
 /** Member photo gallery uploads: images only, up to 6 files of 6 MB. */
@@ -35,8 +35,10 @@ const opt = z.string().trim().max(2000).optional().or(z.literal("").transform(()
 const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().optional());
 const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v === "1", z.boolean());
 
+export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
 const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a supported country");
-const countryField = countryBase.default("IN");
+// Residence country accepts any non-empty string so members from unlisted countries can still submit.
+const countryField = z.string().trim().min(1).max(100).default("IN");
 const optPhoneRaw = z.string().trim().optional().or(z.literal("").transform(() => undefined));
 
 const intakeBase = z.object({
@@ -55,6 +57,7 @@ const intakeBase = z.object({
   familyPhone: optPhoneRaw,
   email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
   familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
+  idProofType: z.string().trim().toUpperCase().pipe(z.enum(ID_PROOF_TYPES, { message: "Choose the type of ID proof" })).optional().or(z.literal("").transform(() => undefined)),
   heightCm: num,
   maritalStatus: opt, community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
   education: opt, profession: opt, income: opt, diet: opt,
@@ -87,7 +90,7 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
 });
 
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
-export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string }, accountId?: string) {
+export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string) {
   const dupe = await prisma.member.findFirst({
     where: { OR: [{ phone: input.phone }, ...(input.email ? [{ email: input.email }] : [])] },
     select: { id: true },
@@ -114,18 +117,22 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
 export const publicRouter = Router();
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please try again later." } });
 
-publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount: 1 }, { name: "biodata", maxCount: 1 }]), wrap(async (req, res) => {
+publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount: 1 }, { name: "biodata", maxCount: 1 }, { name: "idproof", maxCount: 1 }]), wrap(async (req, res) => {
   const input = intakeSchema.parse(req.body);
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   if (f?.photo?.[0] && f.photo[0].size > MAX_PHOTO_BYTES) {
     const mb = (f.photo[0].size / 1048576).toFixed(1);
     throw new HttpError(422, `Your photo is ${mb} MB. Photos must be 5 MB or smaller.`, { fields: { photos: `Your photo is ${mb} MB. Photos must be 5 MB or smaller.` } });
   }
+  // ID proof (Aadhaar, or green card / visa / passport for non-Indians): private, only the admin team can open it.
+  if (config.requireIdProof && !f?.idproof?.[0]) throw new HttpError(422, "Please upload your ID proof.", { fields: { idProof: "Please upload your ID proof (Aadhaar, or green card / visa / passport if you are not an Indian citizen)." } });
+  if (f?.idproof?.[0] && !input.idProofType) throw new HttpError(422, "Choose the type of ID proof.", { fields: { idProofType: "Choose the type of ID proof" } });
   const photoUrl = f?.photo?.[0] ? await saveUpload("photos", f.photo[0]) : undefined;
   const biodataFileUrl = f?.biodata?.[0] ? await saveUpload("docs", f.biodata[0]) : undefined;
+  const idProofUrl = f?.idproof?.[0] ? await saveUpload("docs", f.idproof[0]) : undefined;
   let m;
-  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl }); }
-  catch (e) { await Promise.all([removeObject(photoUrl), removeObject(biodataFileUrl)]); throw e; } // e.g. duplicate phone: don't orphan files
+  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl, idProofUrl }); }
+  catch (e) { await Promise.all([removeObject(photoUrl), removeObject(biodataFileUrl), removeObject(idProofUrl)]); throw e; } // e.g. duplicate phone: don't orphan files
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
 
@@ -141,6 +148,14 @@ const geoLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders:
 publicRouter.get("/cities", geoLimiter, wrap(async (req, res) => {
   const { country, q } = z.object({ country: countryField, q: z.string().trim().default("") }).parse(req.query);
   res.json(searchCities(country as CountryCode, q, 10));
+}));
+
+publicRouter.get("/tags", wrap(async (_req, res) => {
+  const cats = await prisma.tagCategory.findMany({
+    include: { values: { orderBy: { value: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  res.json(cats);
 }));
 
 publicRouter.post("/contact", limiter, wrap(async (req, res) => {
