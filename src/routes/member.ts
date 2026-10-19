@@ -203,12 +203,14 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
       await activity(who(meRow), "MUTUAL_MATCH", "Member", p.id, { with: p.profileCode });
       // email + SMS to both people (each call is best-effort and never throws)
       await Promise.all([sendMutualMatch(meRow, p), sendMutualMatch(p, meRow)]);
-      // push notifications (fire-and-forget)
-      void sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(p.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: p.id });
-      void sendPush(p.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id });
+      // push to both members — must be awaited before res.json() or Vercel kills the fn
+      await Promise.allSettled([
+        sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(p.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: p.id }),
+        sendPush(p.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id }),
+      ]);
     } else {
       // not mutual yet — notify the liked person
-      void sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED" });
+      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED" });
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });
