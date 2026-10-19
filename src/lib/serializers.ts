@@ -69,6 +69,7 @@ export const toContactProfile = async (m: FullMember) => ({
 
 /** A member's own account: includes their own contact details, never admin notes. */
 export async function toSelf(m: FullMember) {
+  const ap = activePlan(m.membershipPlans ?? []);
   return {
     ...(await toPublicProfile(m, true)),
     fullName: m.fullName, phone: m.phone, email: m.email,
@@ -76,6 +77,7 @@ export async function toSelf(m: FullMember) {
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
     dob: m.dob, status: m.status, mustChangePassword: m.mustChangePassword,
     prefs: { communities: list(m.prefCommunities), cities: list(m.prefCities), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate },
+    currentPlan: ap ? { plan: ap.plan, endDate: ap.endDate } : null,
   };
 }
 

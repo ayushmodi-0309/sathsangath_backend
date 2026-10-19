@@ -21,6 +21,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@prisma/client": "^6.19.3",
     "bcryptjs": "^3.0.3",
+    "firebase-admin": "^13.0.0",
     "cors": "^2.8.6",
     "country-state-city": "^3.2.1",
     "dotenv": "^18.0.3",
@@ -46,5 +47,14 @@
     "prisma": "^6.19.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "prisma@6.19.3": true,
+    "protobufjs@7.6.6": true,
+    "@firebase/util@1.15.3": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
   }
 }

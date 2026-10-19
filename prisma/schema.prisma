@@ -92,6 +92,7 @@ model Member {
   passwordHash       String?
   mustChangePassword Boolean  @default(true)
   lastLoginAt        DateTime?
+  fcmToken           String?  // Firebase Cloud Messaging device token for push notifications
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
