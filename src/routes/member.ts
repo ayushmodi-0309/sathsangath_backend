@@ -8,6 +8,7 @@ import { toContactProfile, toMutualProfile, toPublicProfile, toSelf } from "../l
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone } from "../lib/phone";
 import { sendMutualMatch } from "../lib/notify";
+import { sendPush } from "../lib/fcm";
 import { photoUpload } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 
@@ -38,6 +39,13 @@ async function syncMainPhoto(memberId: string) {
 
 // ---------- Account ----------
 memberRouter.get("/me", wrap(async (req, res) => { res.json(await toSelf(await loadMe(me(req)))); }));
+
+// ---------- FCM token ----------
+memberRouter.patch("/fcm-token", wrap(async (req, res) => {
+  const { token } = z.object({ token: z.string().min(1) }).parse(req.body);
+  await prisma.member.update({ where: { id: me(req) }, data: { fcmToken: token } });
+  res.json({ ok: true });
+}));
 
 // Only contact details are editable by the member. Bio data changes go through the admin.
 memberRouter.patch("/me", wrap(async (req, res) => {
@@ -195,6 +203,12 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
       await activity(who(meRow), "MUTUAL_MATCH", "Member", p.id, { with: p.profileCode });
       // email + SMS to both people (each call is best-effort and never throws)
       await Promise.all([sendMutualMatch(meRow, p), sendMutualMatch(p, meRow)]);
+      // push notifications (fire-and-forget)
+      void sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(p.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: p.id });
+      void sendPush(p.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id });
+    } else {
+      // not mutual yet — notify the liked person
+      void sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED" });
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });
