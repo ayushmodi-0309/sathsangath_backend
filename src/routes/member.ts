@@ -237,6 +237,17 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   res.json({ liked: false });
 }));
 
+memberRouter.get("/likes/received", wrap(async (req, res) => {
+  const [likes, mutual] = await Promise.all([
+    prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, include: { liker: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
+    mutualIds(me(req)),
+  ]);
+  res.json(await Promise.all(likes.map(async (l) => {
+    const isMutual = mutual.has(l.likerId);
+    return { ...(await (isMutual ? toMutualProfile(l.liker) : toPublicProfile(l.liker))), liked: isMutual, mutual: isMutual, likedAt: l.createdAt };
+  })));
+}));
+
 memberRouter.get("/likes", wrap(async (req, res) => {
   const [likes, mutual, intros, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, include: { liked: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
