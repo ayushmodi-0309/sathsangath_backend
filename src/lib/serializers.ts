@@ -54,7 +54,7 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
  */
 export const toMutualProfile = async (m: FullMember) => ({
   ...(await toPublicProfile(m, true)), fullName: m.fullName, mutual: true,
-  dob: m.dob,
+  dob: m.dob, dobIsApproximate: m.dobIsApproximate,
   religion: m.religion,
   country: m.country,
   fatherName: m.fatherName,
@@ -62,7 +62,9 @@ export const toMutualProfile = async (m: FullMember) => ({
   income: m.income, // revealed only after a mutual like, and deliberately not filterable
   prefs: {
     ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
-    communities: list(m.prefCommunities), cities: list(m.prefCities), notes: m.prefNotes,
+    communities: list(m.prefCommunities), cities: list(m.prefCities),
+    education: list(m.prefEducation), occupation: list(m.prefOccupation),
+    countries: list(m.prefCountries), incomeMin: m.prefIncomeMin, notes: m.prefNotes,
   },
 });
 
@@ -80,9 +82,15 @@ export async function toSelf(m: FullMember) {
     ...(await toPublicProfile(m, true)),
     fullName: m.fullName, phone: m.phone, email: m.email,
     income: m.income, fatherName: m.fatherName, motherName: m.motherName, createdBy: m.createdBy,
+    religion: m.religion, country: m.country,
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
-    dob: m.dob, status: m.status, mustChangePassword: m.mustChangePassword,
-    prefs: { communities: list(m.prefCommunities), cities: list(m.prefCities), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate },
+    dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
+    prefs: {
+      communities: list(m.prefCommunities), cities: list(m.prefCities),
+      education: list(m.prefEducation), occupation: list(m.prefOccupation),
+      countries: list(m.prefCountries), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, incomeMin: m.prefIncomeMin,
+      notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
+    },
     currentPlan: ap ? { plan: ap.plan, endDate: ap.endDate } : null,
   };
 }
@@ -94,6 +102,8 @@ export async function toAdminMember(m: FullMember) {
   return {
     ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
     prefCommunities: list(m.prefCommunities), prefCities: list(m.prefCities),
+    prefEducation: list(m.prefEducation), prefOccupation: list(m.prefOccupation),
+    prefCountries: list(m.prefCountries), prefIncomeMin: m.prefIncomeMin,
     tags: (m.tags ?? []).map((t) => ({ id: t.tagValueId, value: t.tagValue.value, category: t.tagValue.category.name })),
     currentPlan: ap ? { id: ap.id, plan: ap.plan, startDate: ap.startDate, endDate: ap.endDate, note: ap.note } : null,
   };
