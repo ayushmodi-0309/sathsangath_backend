@@ -22,6 +22,7 @@ accountRouter.get("/me", wrap(async (req, res) => {
 accountRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount: 3 }, { name: "biodata", maxCount: 1 }]), wrap(async (req, res) => {
   const account = await prisma.account.findUniqueOrThrow({ where: { id: req.accountId! } });
   if (await prisma.member.findUnique({ where: { accountId: account.id }, select: { id: true } })) throw new HttpError(409, "You have already submitted your bio data.");
+  if (!req.body.dob) throw new HttpError(422, "Enter a valid date of birth (18 years or older).", { fields: { dob: "Enter a valid date of birth (18 years or older)" } });
   const input = intakeSchema.parse({ ...req.body, email: account.email });
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   const photos = f?.photo ?? [];

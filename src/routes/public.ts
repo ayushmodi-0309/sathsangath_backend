@@ -49,7 +49,7 @@ const intakeBase = z.object({
   dob: z.string().refine((s) => {
     const d = new Date(s); const age = (Date.now() - d.getTime()) / 31557600000;
     return !isNaN(d.getTime()) && age >= 18 && age <= 80;
-  }, "Enter a valid date of birth (18 years or older)"),
+  }, "Enter a valid date of birth (18 years or older)").optional().or(z.literal("").transform(() => undefined)),
   country: countryField,                 // country they live in (decides which cities are valid)
   phoneCountry: countryBase.optional(), // country of the mobile number; defaults to the residence country
   phone: z.string().trim().min(1, "Enter a mobile number"),
@@ -63,7 +63,8 @@ const intakeBase = z.object({
   education: opt, profession: opt, income: opt, diet: opt,
   fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
   prefCommunities: arr.optional(), prefCities: arr.optional(),
-  prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
+  prefEducation: arr.optional(), prefOccupation: arr.optional(), prefCountries: arr.optional(),
+  prefAgeMin: num, prefAgeMax: num, prefIncomeMin: opt, prefNotes: opt,
   motherTongue: opt, fatherName: opt, motherName: opt, familyType: opt, createdBy: opt,
   prefHeightMinCm: num, prefMaritalStatus: opt, prefRelocate: opt,
   consent: bool.refine((v) => v, "Consent is required to submit your bio data"),
@@ -90,20 +91,23 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
 });
 
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
-export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string) {
+export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string, dobIsApproximate?: boolean) {
   const dupe = await prisma.member.findFirst({
     where: { OR: [{ phone: input.phone }, ...(input.email ? [{ email: input.email }] : [])] },
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, dob, ...rest } = input;
+  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, ...rest } = input;
+  if (!dob) throw new HttpError(422, "Enter a date of birth or age.", { fields: { dob: "Enter a date of birth or age" } });
   const { photoUrls, ...fileFields } = files ?? {};
   const photoList = photoUrls?.length ? photoUrls : fileFields.photoUrl ? [fileFields.photoUrl] : [];
   const created = await prisma.member.create({
     data: {
-      ...rest, dob: new Date(dob), source, consentGiven: consent,
+      ...rest, dob: new Date(dob), dobIsApproximate: dobIsApproximate ?? false, source, consentGiven: consent,
       profileCode: await nextProfileCode(),
       prefCommunities: (prefCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
+      prefEducation: (prefEducation ?? []).join(","), prefOccupation: (prefOccupation ?? []).join(","),
+      prefCountries: (prefCountries ?? []).join(","),
       ...fileFields, ...(photoList[0] && { photoUrl: photoList[0] }),
       ...(accountId && { accountId, mustChangePassword: false }), // self-signup members never get an admin-issued temp password
       ...(photoList.length && { photos: { create: photoList.map((url, i) => ({ url, isMain: i === 0 })) } }),
@@ -118,6 +122,7 @@ export const publicRouter = Router();
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please try again later." } });
 
 publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount: 1 }, { name: "biodata", maxCount: 1 }, { name: "idproof", maxCount: 1 }]), wrap(async (req, res) => {
+  if (!req.body.dob) throw new HttpError(422, "Enter a valid date of birth (18 years or older).", { fields: { dob: "Enter a valid date of birth (18 years or older)" } });
   const input = intakeSchema.parse(req.body);
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   if (f?.photo?.[0] && f.photo[0].size > MAX_PHOTO_BYTES) {

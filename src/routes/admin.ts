@@ -166,13 +166,22 @@ const adminUpload = multer({
   fileFilter: (_r, f, cb) => (ADMIN_ALLOWED.has(f.mimetype) ? cb(null, true) : cb(new HttpError(422, "Only JPG, PNG, WebP or PDF files are allowed."))),
 });
 adminRouter.post("/members", adminUpload.fields([{ name: "photo", maxCount: 3 }, { name: "biodata", maxCount: 1 }, { name: "idproof", maxCount: 1 }]), wrap(async (req, res) => {
-  const input = intakeSchema.parse({ ...req.body, consent: true });
+  let dobIsApproximate = false;
+  const body = { ...req.body, consent: true };
+  if (!body.dob && body.age) {
+    const age = parseInt(body.age, 10);
+    if (!isNaN(age) && age >= 18 && age <= 80) {
+      body.dob = `${new Date().getFullYear() - age}-07-01`;
+      dobIsApproximate = true;
+    } else {
+      throw new HttpError(422, "Enter a valid age (18–80).", { fields: { age: "Enter a valid age between 18 and 80" } });
+    }
+  }
+  const input = intakeSchema.parse(body);
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   const photos = f?.photo ?? [];
-  if (!photos.length) throw new HttpError(422, "Please add at least one photo.", { fields: { photos: "Please add at least one photo" } });
   const big = photos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
   if (big) throw new HttpError(422, "Photos must be JPG, PNG or WebP and 5 MB or smaller.", { fields: { photos: "Photos must be JPG, PNG or WebP and 5 MB or smaller" } });
-  if (config.requireIdProof && !f?.idproof?.[0]) throw new HttpError(422, "Please upload the ID proof.", { fields: { idProof: "Please upload the ID proof" } });
   if (f?.idproof?.[0] && !input.idProofType) throw new HttpError(422, "Choose the type of ID proof.", { fields: { idProofType: "Choose the type of ID proof" } });
   const photoUrls: string[] = [];
   let biodataFileUrl: string | undefined, idProofUrl: string | undefined;
@@ -180,7 +189,7 @@ adminRouter.post("/members", adminUpload.fields([{ name: "photo", maxCount: 3 },
     for (const p of photos) photoUrls.push(await saveUpload("photos", p));
     if (f?.biodata?.[0]) biodataFileUrl = await saveUpload("docs", f.biodata[0]);
     if (f?.idproof?.[0]) idProofUrl = await saveUpload("docs", f.idproof[0]);
-    const m = await createSubmission(input, "ADMIN", { photoUrls, biodataFileUrl, idProofUrl });
+    const m = await createSubmission(input, "ADMIN", { photoUrls, biodataFileUrl, idProofUrl }, undefined, dobIsApproximate);
     await audit(adminId(req), "CREATE", "Member", m.id);
     res.status(201).json({ id: m.id, profileCode: m.profileCode });
   } catch (e) {
@@ -201,17 +210,91 @@ const editSchema = z.object({
   motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
   nativePlace: z.string().nullable(), prefHeightMinCm: z.number().int().nullable(), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
   prefCommunities: z.array(z.string()), prefCities: z.array(z.string()),
+  prefEducation: z.array(z.string()), prefOccupation: z.array(z.string()), prefCountries: z.array(z.string()),
+  prefIncomeMin: z.string().nullable(),
 }).partial();
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
-  const { prefCommunities, prefCities, ...d } = editSchema.parse(req.body);
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, ...d } = editSchema.parse(req.body);
   const m = await prisma.member.update({
     where: { id: pid(req.params.id) },
-    data: { ...d, ...(prefCommunities && { prefCommunities: prefCommunities.join(",") }), ...(prefCities && { prefCities: prefCities.join(",") }) },
+    data: {
+      ...d,
+      ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
+      ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
+      ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
+      ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),
+      ...(prefCountries !== undefined && { prefCountries: prefCountries.join(",") }),
+    },
     include: includeTags,
   });
   await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
   res.json(await toAdminMember(m));
+}));
+
+// Full edit (multipart) — same as PATCH but also handles DOB/age toggle and file uploads.
+const fullEditSchema = editSchema.extend({
+  dob: z.string().optional().or(z.literal("").transform(() => undefined)),
+  age: z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().min(18).max(80).optional()),
+  dobIsApproximate: z.preprocess((v) => v === true || v === "true" || v === "1", z.boolean()).optional(),
+  country: z.string().trim().optional(),
+  idProofType: z.string().trim().optional().or(z.literal("").transform(() => undefined)),
+  phoneCountry: z.string().trim().optional(),
+  familyPhoneCountry: z.string().trim().optional(),
+});
+
+adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3 }, { name: "biodata", maxCount: 1 }, { name: "idproof", maxCount: 1 }]), wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  let dobIsApproximate: boolean | undefined;
+  const body = { ...req.body };
+  if (!body.dob && body.age) {
+    const age = parseInt(body.age, 10);
+    if (!isNaN(age) && age >= 18 && age <= 80) {
+      body.dob = `${new Date().getFullYear() - age}-07-01`;
+      dobIsApproximate = true;
+    } else {
+      throw new HttpError(422, "Enter a valid age (18–80).", { fields: { age: "Enter a valid age between 18 and 80" } });
+    }
+  } else if (body.dob) {
+    dobIsApproximate = false;
+  }
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, ...d } = fullEditSchema.parse(body);
+  void _age;
+  const f = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const newPhotos = f?.photo ?? [];
+  const big = newPhotos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
+  if (big) throw new HttpError(422, "Photos must be JPG, PNG or WebP and 5 MB or smaller.", { fields: { photos: "Photos must be JPG, PNG or WebP and 5 MB or smaller" } });
+  const uploadedPhotoUrls: string[] = [];
+  let biodataFileUrl: string | undefined, idProofUrl: string | undefined;
+  try {
+    for (const p of newPhotos) uploadedPhotoUrls.push(await saveUpload("photos", p));
+    if (f?.biodata?.[0]) biodataFileUrl = await saveUpload("docs", f.biodata[0]);
+    if (f?.idproof?.[0]) idProofUrl = await saveUpload("docs", f.idproof[0]);
+    const m = await prisma.member.update({
+      where: { id },
+      data: {
+        ...d,
+        ...(dob !== undefined && { dob: new Date(dob) }),
+        ...(dobIsApproximate !== undefined && { dobIsApproximate }),
+        ...(country && { country }),
+        ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
+        ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
+        ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
+        ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),
+        ...(prefCountries !== undefined && { prefCountries: prefCountries.join(",") }),
+        ...(biodataFileUrl && { biodataFileUrl }),
+        ...(idProofUrl && { idProofUrl }),
+        ...(uploadedPhotoUrls.length && { photoUrl: uploadedPhotoUrls[0] }),
+        ...(uploadedPhotoUrls.length && { photos: { create: uploadedPhotoUrls.map((url, i) => ({ url, isMain: i === 0 })) } }),
+      },
+      include: includeTags,
+    });
+    await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
+    res.json(await toAdminMember(m));
+  } catch (e) {
+    await Promise.all([...uploadedPhotoUrls.map((u) => removeObject(u)), removeObject(biodataFileUrl), removeObject(idProofUrl)]);
+    throw e;
+  }
 }));
 
 // ---------- Review workflow ----------

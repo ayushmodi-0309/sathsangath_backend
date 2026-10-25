@@ -47,6 +47,7 @@ model Member {
   // --- visible bio data ---
   gender             String   // MALE | FEMALE
   dob                DateTime
+  dobIsApproximate   Boolean  @default(false) // true when only age was given (admin entry); dob is synthesised as Jul 1 of that year
   heightCm           Int?
   maritalStatus      String?
   community          String?
@@ -78,8 +79,12 @@ model Member {
   // --- partner preferences (comma separated lists) ---
   prefCommunities    String   @default("")
   prefCities         String   @default("")
+  prefEducation      String   @default("")
+  prefOccupation     String   @default("")
   prefAgeMin         Int?
   prefAgeMax         Int?
+  prefIncomeMin      String?
+  prefCountries      String   @default("")
   prefNotes          String?
   prefHeightMinCm    Int?
   prefMaritalStatus  String?
