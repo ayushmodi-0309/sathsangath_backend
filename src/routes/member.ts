@@ -6,7 +6,8 @@ import { requireApproved, requireMember } from "../lib/auth";
 import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
 import { toContactProfile, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { activity, list, memberLabel } from "../lib/util";
-import { checkAnyPhone } from "../lib/phone";
+import { checkAnyPhone, type CountryCode } from "../lib/phone";
+import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
 import { photoUpload } from "./public";
@@ -61,6 +62,58 @@ memberRouter.patch("/me", wrap(async (req, res) => {
   }
   const m = await prisma.member.update({ where: { id: me(req) }, data: d, include: includeTags });
   await activity(who(m), "UPDATED_CONTACT_DETAILS", "Member", m.id);
+  res.json(await toSelf(m));
+}));
+
+// All profile fields except fullName are self-editable. Contact/phone changes still go through PATCH /member/me.
+memberRouter.patch("/profile", wrap(async (req, res) => {
+  const str = z.string().trim().max(2000).optional();
+  const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().optional());
+  const arr = z.preprocess((v) => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string" && v.trim()) return v.split(",").map((s) => s.trim()).filter(Boolean);
+    return undefined;
+  }, z.array(z.string().trim()).optional());
+
+  const d = z.object({
+    gender: z.string().trim().toUpperCase().pipe(z.enum(["MALE", "FEMALE"])).optional(),
+    dob: z.string().refine((s) => { const d = new Date(s); const age = (Date.now() - d.getTime()) / 31557600000; return !isNaN(d.getTime()) && age >= 18 && age <= 80; }, "Enter a valid date of birth (18 years or older)").optional(),
+    heightCm: num,
+    maritalStatus: str, motherTongue: str, diet: str, createdBy: str,
+    community: str, subCommunity: str,
+    city: str, state: str, nativePlace: str,
+    education: str, profession: str, income: str, about: str,
+    fatherName: str, fatherOccupation: str,
+    motherName: str, motherOccupation: str,
+    siblings: str, familyType: str, familyBackground: str,
+    prefAgeMin: num, prefAgeMax: num, prefHeightMinCm: num,
+    prefMaritalStatus: str, prefRelocate: str, prefIncomeMin: str, prefNotes: str,
+    prefCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
+  }).parse(req.body);
+
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, ...rest } = d;
+
+  // Verify city against member's country
+  let resolvedCity = city, resolvedState = state;
+  if (city) {
+    const member = await loadMe(me(req));
+    const hit = verifyCity((member.country || "IN") as CountryCode, city, state);
+    if (!hit) throw new HttpError(422, `We could not find "${city}". Please pick a city from the suggestions.`, { fields: { city: `"${city}" was not found in our city list.` } });
+    resolvedCity = hit.name; resolvedState = hit.state || state;
+  }
+
+  const data: Record<string, unknown> = { ...rest };
+  if (resolvedCity !== undefined) data.city = resolvedCity;
+  if (resolvedState !== undefined) data.state = resolvedState;
+  if (dob) data.dob = new Date(dob);
+  if (prefCommunities !== undefined) data.prefCommunities = prefCommunities.join(",");
+  if (prefCities !== undefined) data.prefCities = prefCities.join(",");
+  if (prefEducation !== undefined) data.prefEducation = prefEducation.join(",");
+  if (prefOccupation !== undefined) data.prefOccupation = prefOccupation.join(",");
+  if (prefCountries !== undefined) data.prefCountries = prefCountries.join(",");
+
+  const m = await prisma.member.update({ where: { id: me(req) }, data, include: includeTags });
+  await activity(who(m), "UPDATED_PROFILE", "Member", m.id);
   res.json(await toSelf(m));
 }));
 
