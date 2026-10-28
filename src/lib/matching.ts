@@ -116,22 +116,29 @@ async function curatedFeed(viewerId: string) {
     orderBy: { approvedAt: "desc" },
   });
 
-  const wantComm = list(viewer.prefCommunities).map((s) => s.toLowerCase());
-  const wantCity = list(viewer.prefCities).map((s) => s.toLowerCase());
-  const now = Date.now();
+  // TEMPORARILY DISABLED: preference-based filtering (community, city, age range).
+  // All approved opposite-gender profiles are returned regardless of viewer preferences.
+  // Re-enable by uncommenting the block below.
+  // const wantComm = list(viewer.prefCommunities).map((s) => s.toLowerCase());
+  // const wantCity = list(viewer.prefCities).map((s) => s.toLowerCase());
+  // const now = Date.now();
+  // return candidates.filter((c) => {
+  //   if (hide.has(c.id)) return false;
+  //   if (show.has(c.id)) return true;
+  //   const tagVals = (cat: string) =>
+  //     c.tags.filter((t) => t.tagValue.category.name.toLowerCase() === cat).map((t) => t.tagValue.value.toLowerCase());
+  //   const comm = tagVals("community"); if (!comm.length && c.community) comm.push(c.community.toLowerCase());
+  //   const city = tagVals("city"); if (!city.length && c.city) city.push(c.city.toLowerCase());
+  //   if (wantComm.length && !comm.some((x) => wantComm.includes(x))) return false;
+  //   if (wantCity.length && !city.some((x) => wantCity.includes(x))) return false;
+  //   const age = Math.floor((now - c.dob.getTime()) / 31557600000);
+  //   if (viewer.prefAgeMin && age < viewer.prefAgeMin) return false;
+  //   if (viewer.prefAgeMax && age > viewer.prefAgeMax) return false;
+  //   return true;
+  // });
 
   return candidates.filter((c) => {
     if (hide.has(c.id)) return false;
-    if (show.has(c.id)) return true;
-    const tagVals = (cat: string) =>
-      c.tags.filter((t) => t.tagValue.category.name.toLowerCase() === cat).map((t) => t.tagValue.value.toLowerCase());
-    const comm = tagVals("community"); if (!comm.length && c.community) comm.push(c.community.toLowerCase());
-    const city = tagVals("city"); if (!city.length && c.city) city.push(c.city.toLowerCase());
-    if (wantComm.length && !comm.some((x) => wantComm.includes(x))) return false;
-    if (wantCity.length && !city.some((x) => wantCity.includes(x))) return false;
-    const age = Math.floor((now - c.dob.getTime()) / 31557600000);
-    if (viewer.prefAgeMin && age < viewer.prefAgeMin) return false;
-    if (viewer.prefAgeMax && age > viewer.prefAgeMax) return false;
     return true;
   });
 }
