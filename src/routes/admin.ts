@@ -253,21 +253,27 @@ const prefList = z.preprocess((v) => {
   return v.trim() ? v.split(",").map((x) => x.trim()).filter(Boolean) : [];
 }, z.array(z.string().trim()).optional());
 
+/**
+ * An optional text field on the edit routes. Clearing one in the admin form sends "", which should
+ * null the column rather than store an empty string, so the field reads as unset everywhere.
+ */
+const clearableText = z.preprocess((v) => (v === "" ? null : v), z.string().trim().nullable());
+
 const editSchema = z.object({
-  fullName: z.string().trim().min(2), phone: z.string().trim(), email: z.string().trim().nullable(),
-  familyPhone: z.string().trim().nullable(), familyEmail: z.string().trim().nullable(),
-  gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(100, 250), maritalStatus: z.string().nullable(),
-  weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: z.string().nullable(),
-  community: z.string().nullable(), subCommunity: z.string().nullable(), city: z.string().nullable(), state: z.string().nullable(),
-  education: z.string().nullable(), profession: z.string().nullable(), income: z.string().nullable(), diet: z.string().nullable(),
-  fatherOccupation: z.string().nullable(), motherOccupation: z.string().nullable(), siblings: z.string().nullable(),
-  familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
-  prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
-  motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
-  nativePlace: z.string().nullable(), prefHeightMinCm: intEdit(100, 250), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
+  fullName: z.string().trim().min(2), phone: z.string().trim(), email: clearableText,
+  familyPhone: clearableText, familyEmail: clearableText,
+  gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(100, 250), maritalStatus: clearableText,
+  weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
+  community: clearableText, subCommunity: clearableText, city: clearableText, state: clearableText,
+  education: clearableText, profession: clearableText, income: clearableText, diet: clearableText,
+  fatherOccupation: clearableText, motherOccupation: clearableText, siblings: clearableText,
+  familyBackground: clearableText, about: clearableText, prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
+  prefNotes: clearableText, adminNote: clearableText,
+  motherTongue: clearableText, fatherName: clearableText, motherName: clearableText, familyType: clearableText, createdBy: clearableText,
+  nativePlace: clearableText, prefHeightMinCm: intEdit(100, 250), prefMaritalStatus: clearableText, prefRelocate: clearableText,
   prefCommunities: prefList, prefCities: prefList,
   prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
-  prefIncomeMin: z.string().nullable(),
+  prefIncomeMin: clearableText,
 }).partial();
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
