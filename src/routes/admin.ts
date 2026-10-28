@@ -237,6 +237,22 @@ const birthTimeEdit = z.union([
   }),
 ]);
 
+/**
+ * A preference list on the edit routes.
+ *
+ * The edit form appends one FormData entry per value, and Express parses a lone entry as a plain
+ * string rather than a one-item array, so a member with exactly one preferred community, city,
+ * education, occupation or country could not be saved at all: the whole PUT failed with
+ * "expected array, received string". Accept either shape, and treat a comma-separated string the
+ * way the intake form does. An absent key stays undefined so the stored list is left alone.
+ */
+const prefList = z.preprocess((v) => {
+  if (v === undefined) return undefined;
+  if (Array.isArray(v)) return v;
+  if (typeof v !== "string") return v;
+  return v.trim() ? v.split(",").map((x) => x.trim()).filter(Boolean) : [];
+}, z.array(z.string().trim()).optional());
+
 const editSchema = z.object({
   fullName: z.string().trim().min(2), phone: z.string().trim(), email: z.string().trim().nullable(),
   familyPhone: z.string().trim().nullable(), familyEmail: z.string().trim().nullable(),
@@ -249,8 +265,8 @@ const editSchema = z.object({
   prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
   motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
   nativePlace: z.string().nullable(), prefHeightMinCm: intEdit(100, 250), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
-  prefCommunities: z.array(z.string()), prefCities: z.array(z.string()),
-  prefEducation: z.array(z.string()), prefOccupation: z.array(z.string()), prefCountries: z.array(z.string()),
+  prefCommunities: prefList, prefCities: prefList,
+  prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
   prefIncomeMin: z.string().nullable(),
 }).partial();
 
