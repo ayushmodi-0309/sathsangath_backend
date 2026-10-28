@@ -14,6 +14,7 @@ import { config } from "../lib/config";
 import multer from "multer";
 import { createSubmission, intakeSchema, MAX_PHOTO_BYTES, normaliseBirthTime } from "./public";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
+import { checkAnyPhone, checkPhone, isCountry, type CountryCode } from "../lib/phone";
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin());
@@ -211,6 +212,20 @@ const intEdit = (min: number, max: number) => z.preprocess(
   z.number().int().min(min).max(max).nullable().optional(),
 );
 
+/**
+ * Puts a phone number through the same check the intake form uses, so an edit can never store a
+ * number the API would have rejected on submission.
+ *
+ * This matters because the stored format is not what the form field holds: India keeps a bare
+ * 10-digit number while every other country is stored as +<dial><national>. Writing the field
+ * straight through dropped the "+" and corrupted every non-Indian number.
+ */
+function normalisedPhone(raw: string, country: CountryCode, field: "phone" | "familyPhone"): string {
+  const r = checkPhone(raw, country);
+  if (!r.ok) throw new HttpError(422, r.error, { fields: { [field]: r.error } });
+  return r.value;
+}
+
 /** Same tolerant normalising the intake form does, but nullable so the admin can clear the field. */
 const birthTimeEdit = z.union([
   z.null(),
@@ -241,6 +256,14 @@ const editSchema = z.object({
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, ...d } = editSchema.parse(req.body);
+  // This route carries no country field, so the number's own +dialcode decides it (else India).
+  for (const field of ["phone", "familyPhone"] as const) {
+    const raw = d[field];
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const r = checkAnyPhone(raw);
+    if (!r.ok) throw new HttpError(422, r.error, { fields: { [field]: r.error } });
+    d[field] = r.value;
+  }
   const m = await prisma.member.update({
     where: { id: pid(req.params.id) },
     data: {
@@ -287,6 +310,16 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   }
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, ...d } = fullEditSchema.parse(body);
   void _age;
+  // Normalise both numbers before they are written. Falls back to the member's residence country
+  // when the form did not say which country the number was typed under.
+  const residence = await prisma.member.findUniqueOrThrow({ where: { id }, select: { country: true } });
+  const home = (isCountry(country) ? country : isCountry(residence.country) ? residence.country : "IN") as CountryCode;
+  if (typeof d.phone === "string" && d.phone.trim()) {
+    d.phone = normalisedPhone(d.phone, isCountry(phoneCountry) ? phoneCountry : home, "phone");
+  }
+  if (typeof d.familyPhone === "string" && d.familyPhone.trim()) {
+    d.familyPhone = normalisedPhone(d.familyPhone, isCountry(familyPhoneCountry) ? familyPhoneCountry : isCountry(phoneCountry) ? phoneCountry : home, "familyPhone");
+  }
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   const newPhotos = f?.photo ?? [];
   const big = newPhotos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
