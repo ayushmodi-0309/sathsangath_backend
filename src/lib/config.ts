@@ -4,7 +4,7 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET ?? "dev-secret",
   jwtExpires: process.env.JWT_EXPIRES_IN ?? "7d",
   // Always allow the deployed website; CORS_ORIGINS adds more (local dev, custom domains, previews).
-  corsOrigins: ["https://sathsangath-frontend.vercel.app", ...(process.env.CORS_ORIGINS ?? "").split(",")]
+  corsOrigins: ["https://sathsangath-frontend.vercel.app", "https://www.sathsangath.in", ...(process.env.CORS_ORIGINS ?? "").split(",")]
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean),
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID ?? "sathsangath-9014",
