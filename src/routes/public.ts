@@ -2,6 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { prisma } from "../lib/db";
+import { learnTagValuesFor } from "../lib/tags";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
@@ -40,6 +41,36 @@ const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a 
 // Residence country accepts any non-empty string so members from unlisted countries can still submit.
 const countryField = z.string().trim().min(1).max(100).default("IN");
 const optPhoneRaw = z.string().trim().optional().or(z.literal("").transform(() => undefined));
+/**
+ * Birth time is stored as "HH:MM" on a 24-hour clock. The web forms send exactly that, but the
+ * Google-Form webhook and bulk imports carry whatever people wrote by hand ("8:36 AM", "04:55
+ * A.M.", "8.36 pm"), so those are normalised here rather than rejecting a whole bio data over it.
+ */
+export function normaliseBirthTime(raw: string): string | null {
+  const m = /^(\d{1,2})\s*[:.]\s*(\d{2})\s*(a\.?m\.?|p\.?m\.?)?$/i.exec(raw.trim());
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2]);
+  const suffix = m[3]?.toLowerCase().replace(/[.\s]/g, "");
+  if (min > 59) return null;
+  if (suffix) {
+    if (h < 1 || h > 12) return null;
+    if (suffix === "am") h = h === 12 ? 0 : h;
+    else h = h === 12 ? 12 : h + 12;
+  } else if (h > 23) return null;
+  return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+}
+export const birthTimeField = z.string().trim()
+  .transform((v, ctx) => {
+    const t = normaliseBirthTime(v);
+    if (!t) { ctx.addIssue({ code: "custom", message: "Enter the birth time as HH:MM, for example 08:36 or 8:36 PM" }); return z.NEVER; }
+    return t;
+  })
+  .optional().or(z.literal("").transform(() => undefined));
+export const weightKgField = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : Number(v)),
+  z.number("Enter the weight in kilograms").int("Enter the weight in whole kilograms").min(30, "Enter a weight of 30 kg or more").max(250, "Enter a weight of 250 kg or less").optional(),
+);
 
 const intakeBase = z.object({
   /** Sathsangath only accepts Hindu families. The website asks this first; the API enforces it too. */
@@ -59,6 +90,8 @@ const intakeBase = z.object({
   familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
   idProofType: z.string().trim().toUpperCase().pipe(z.enum(ID_PROOF_TYPES, { message: "Choose the type of ID proof" })).optional().or(z.literal("").transform(() => undefined)),
   heightCm: num,
+  weightKg: weightKgField,
+  birthTime: birthTimeField, birthPlace: opt,
   maritalStatus: opt, community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
   education: opt, profession: opt, income: opt, diet: opt,
   fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
@@ -113,6 +146,8 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
       ...(photoList.length && { photos: { create: photoList.map((url, i) => ({ url, isMain: i === 0 })) } }),
     },
   });
+  // Any value typed that was not on a dropdown yet joins that list, so it is there for the next person.
+  await learnTagValuesFor(created.id, created);
   await activity({ type: "PUBLIC", name: memberLabel(created) }, "SUBMITTED_BIODATA", "Member", created.id, { source });
   if (source !== "ADMIN") await sendSubmissionReceived(created); // "we have received your bio data" (email + SMS); never throws
   return created;

@@ -7,11 +7,12 @@ import { HttpError, paging, wrap } from "../lib/http";
 import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { toAdminMember } from "../lib/serializers";
+import { learnTagValuesFor } from "../lib/tags";
 import { audit, tempPassword } from "../lib/util";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
-import { createSubmission, intakeSchema, MAX_PHOTO_BYTES } from "./public";
+import { createSubmission, intakeSchema, MAX_PHOTO_BYTES, normaliseBirthTime } from "./public";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 
 export const adminRouter = Router();
@@ -54,6 +55,7 @@ const listQuery = z.object({
   state: z.string().optional(),
   country: z.string().optional(),
   nativePlace: z.string().optional(),
+  birthPlace: z.string().optional(),
   religion: z.string().optional(),
   motherTongue: z.string().optional(),
   familyType: z.string().optional(),
@@ -92,6 +94,7 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   if (q.state)        w.state = { contains: q.state, mode: "insensitive" };
   if (q.country)      w.country = q.country;
   if (q.nativePlace)  w.nativePlace = { contains: q.nativePlace, mode: "insensitive" };
+  if (q.birthPlace)   w.birthPlace = { contains: q.birthPlace, mode: "insensitive" };
   if (q.religion)     w.religion = { contains: q.religion, mode: "insensitive" };
   if (q.motherTongue) w.motherTongue = { contains: q.motherTongue, mode: "insensitive" };
   if (q.familyType)   w.familyType = q.familyType;
@@ -198,17 +201,39 @@ adminRouter.post("/members", adminUpload.fields([{ name: "photo", maxCount: 3 },
   }
 }));
 
+/**
+ * A whole-number field on the edit routes. PUT /members/:id is multipart, so every value arrives as
+ * a string ("173"), which a bare z.number() rejects: these coerce instead. An absent key stays
+ * undefined (leave the column alone) while "" or null means null (clear it).
+ */
+const intEdit = (min: number, max: number) => z.preprocess(
+  (v) => (v === undefined ? undefined : v === "" || v === null ? null : Number(v)),
+  z.number().int().min(min).max(max).nullable().optional(),
+);
+
+/** Same tolerant normalising the intake form does, but nullable so the admin can clear the field. */
+const birthTimeEdit = z.union([
+  z.null(),
+  z.literal("").transform(() => null),
+  z.string().trim().transform((v, ctx) => {
+    const t = normaliseBirthTime(v);
+    if (!t) { ctx.addIssue({ code: "custom", message: "Enter the birth time as HH:MM, for example 08:36 or 8:36 PM" }); return z.NEVER; }
+    return t;
+  }),
+]);
+
 const editSchema = z.object({
   fullName: z.string().trim().min(2), phone: z.string().trim(), email: z.string().trim().nullable(),
   familyPhone: z.string().trim().nullable(), familyEmail: z.string().trim().nullable(),
-  gender: z.enum(["MALE", "FEMALE"]), heightCm: z.number().int().nullable(), maritalStatus: z.string().nullable(),
+  gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(100, 250), maritalStatus: z.string().nullable(),
+  weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: z.string().nullable(),
   community: z.string().nullable(), subCommunity: z.string().nullable(), city: z.string().nullable(), state: z.string().nullable(),
   education: z.string().nullable(), profession: z.string().nullable(), income: z.string().nullable(), diet: z.string().nullable(),
   fatherOccupation: z.string().nullable(), motherOccupation: z.string().nullable(), siblings: z.string().nullable(),
-  familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: z.number().int().nullable(), prefAgeMax: z.number().int().nullable(),
+  familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
   prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
   motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
-  nativePlace: z.string().nullable(), prefHeightMinCm: z.number().int().nullable(), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
+  nativePlace: z.string().nullable(), prefHeightMinCm: intEdit(100, 250), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
   prefCommunities: z.array(z.string()), prefCities: z.array(z.string()),
   prefEducation: z.array(z.string()), prefOccupation: z.array(z.string()), prefCountries: z.array(z.string()),
   prefIncomeMin: z.string().nullable(),
@@ -228,8 +253,10 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     },
     include: includeTags,
   });
+  // An admin typing a value that is not on a dropdown yet adds it to that list for everyone.
+  await learnTagValuesFor(m.id, m);
   await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
-  res.json(await toAdminMember(m));
+  res.json(await toAdminMember(await prisma.member.findUniqueOrThrow({ where: { id: m.id }, include: includeTags })));
 }));
 
 // Full edit (multipart) — same as PATCH but also handles DOB/age toggle and file uploads.
