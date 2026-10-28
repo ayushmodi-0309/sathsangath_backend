@@ -17,6 +17,9 @@ const toPhotos = (m: FullMember) => Promise.all((m.photos ?? []).map(async (p) =
  * PRIVACY: this is the ONLY shape another member ever receives.
  * Name, phone, email, family contacts, DOB and the original document are never included —
  * masking happens here on the server, not with CSS.
+ *
+ * birthTime and birthPlace are horoscope data and are admin-only: they appear in
+ * toAdminMember and in no member-facing shape, not even toSelf. Do not add them here.
  */
 export async function toPublicProfile(m: FullMember, allPhotos = false) {
   return {
@@ -25,6 +28,7 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
     gender: m.gender,
     age: ageFrom(m.dob),
     heightCm: m.heightCm,
+    weightKg: m.weightKg,
     maritalStatus: m.maritalStatus,
     community: m.community,
     subCommunity: m.subCommunity,

@@ -5,12 +5,13 @@ import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
 import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
 import { toContactProfile, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
+import { learnTagValuesFor } from "../lib/tags";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone, type CountryCode } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { photoUpload } from "./public";
+import { photoUpload, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 
 export const memberRouter = Router();
@@ -78,7 +79,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   const d = z.object({
     gender: z.string().trim().toUpperCase().pipe(z.enum(["MALE", "FEMALE"])).optional(),
     dob: z.string().refine((s) => { const d = new Date(s); const age = (Date.now() - d.getTime()) / 31557600000; return !isNaN(d.getTime()) && age >= 18 && age <= 80; }, "Enter a valid date of birth (18 years or older)").optional(),
-    heightCm: num,
+    heightCm: num, weightKg: weightKgField,
     maritalStatus: str, motherTongue: str, diet: str, createdBy: str,
     community: str, subCommunity: str,
     city: str, state: str, nativePlace: str,
@@ -113,8 +114,10 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   if (prefCountries !== undefined) data.prefCountries = prefCountries.join(",");
 
   const m = await prisma.member.update({ where: { id: me(req) }, data, include: includeTags });
+  // A member typing a value that is not on a dropdown yet adds it to that list for everyone.
+  await learnTagValuesFor(m.id, m);
   await activity(who(m), "UPDATED_PROFILE", "Member", m.id);
-  res.json(await toSelf(m));
+  res.json(await toSelf(await prisma.member.findUniqueOrThrow({ where: { id: m.id }, include: includeTags })));
 }));
 
 memberRouter.get("/summary", wrap(async (req, res) => {

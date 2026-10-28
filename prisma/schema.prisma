@@ -48,7 +48,10 @@ model Member {
   gender             String   // MALE | FEMALE
   dob                DateTime
   dobIsApproximate   Boolean  @default(false) // true when only age was given (admin entry); dob is synthesised as Jul 1 of that year
+  birthTime          String?  // "HH:MM", 24-hour. Horoscope data: admin only, never sent to another member.
+  birthPlace         String?  // city of birth. Horoscope data: admin only, never sent to another member.
   heightCm           Int?
+  weightKg           Int?
   maritalStatus      String?
   community          String?
   subCommunity       String?

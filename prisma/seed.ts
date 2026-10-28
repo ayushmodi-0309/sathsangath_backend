@@ -14,6 +14,10 @@ const TAGS: Record<string, string[]> = {
   City: ["Ahmedabad", "Surat", "Vadodara", "Mumbai", "Rajkot"],
   Education: ["Graduate", "Post Graduate", "Professional"],
   Profession: ["Business", "Service", "Doctor", "Engineer"],
+  // These three start empty on purpose: they fill in from real bio data via learnTagValues().
+  "Sub-community": [],
+  "Mother tongue": [],
+  "Birth Place": [],
 };
 
 // code, gender, name, community, city, age, education, profession, photo file, status
