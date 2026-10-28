@@ -12,11 +12,19 @@ export const tempPassword = () => {
   const c = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
   return Array.from(crypto.randomBytes(10), (b) => c[b % c.length]).join("") + "@1";
 };
+/** Member IDs run sequentially from SS-1001. Derived from the highest code in use, not the row
+ * count, so deleting a member never rewinds the sequence or reissues a retired ID. */
+export const PROFILE_CODE_START = 1001;
 export async function nextProfileCode() {
-  const n = await prisma.member.count();
-  let code = `SS-${1001 + n}`;
-  while (await prisma.member.findUnique({ where: { profileCode: code } })) code = `SS-${1001 + n + Math.floor(Math.random() * 9000)}`;
-  return code;
+  const rows = await prisma.member.findMany({ select: { profileCode: true } });
+  const highest = rows.reduce((max, { profileCode }) => {
+    const n = /^SS-(\d+)$/.exec(profileCode);
+    return n ? Math.max(max, parseInt(n[1], 10)) : max;
+  }, PROFILE_CODE_START - 1);
+  let next = highest + 1;
+  // Guards against two submissions landing at once: step forward until the code is free.
+  while (await prisma.member.findUnique({ where: { profileCode: `SS-${next}` } })) next++;
+  return `SS-${next}`;
 }
 /** Normalises Indian mobile numbers to 10 digits so duplicates are detected reliably. */
 export const normPhone = (p: string) => p.replace(/[^\d+]/g, "").replace(/^(\+?91)(?=\d{10}$)/, "");
