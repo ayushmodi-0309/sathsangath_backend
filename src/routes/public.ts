@@ -37,6 +37,18 @@ const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)),
 const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v === "1", z.boolean());
 
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
+/**
+ * The fixed choices the web forms offer as dropdowns (frontend/lib/geo.ts and the form files).
+ * They are enumerated here too so the API, not the form, is what rejects a value off the list.
+ */
+export const MARITAL_STATUSES = ["Never married", "Divorced", "Widowed", "Awaiting divorce"] as const;
+export const DIETS = ["Vegetarian", "Jain vegetarian", "Eggetarian", "Non-vegetarian"] as const;
+export const FAMILY_TYPES = ["Joint family", "Nuclear family"] as const;
+export const RELOCATE = ["Yes", "Maybe", "No"] as const;
+export const INCOME_RANGES = ["\u20b91\u20133 lakh", "\u20b93\u20135 lakh", "\u20b95\u20137 lakh", "\u20b97\u201310 lakh", "\u20b910\u201315 lakh", "\u20b915\u201320 lakh", "\u20b920\u201330 lakh", "\u20b930\u201350 lakh", "\u20b950 lakh\u20131 crore", "\u20b91 crore+"] as const;
+/** An optional field whose value must come from a fixed list; "" is treated as "not given". */
+const oneOfList = <T extends readonly [string, ...string[]]>(vals: T, msg: string) =>
+  z.string().trim().pipe(z.enum(vals, { message: msg })).optional().or(z.literal("").transform(() => undefined));
 const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a supported country");
 // Residence country accepts any non-empty string so members from unlisted countries can still submit.
 const countryField = z.string().trim().min(1).max(100).default("IN");
@@ -95,14 +107,22 @@ const intakeBase = z.object({
     z.number().int("Enter the height in whole centimetres").min(120, "Enter a height of 120 cm or more").max(250, "Enter a height of 250 cm or less").optional()),
   weightKg: weightKgField,
   birthTime: birthTimeField, birthPlace: opt,
-  maritalStatus: opt, community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
-  education: opt, profession: opt, income: opt, diet: opt,
+  // Both web forms mark marital status required, so the API requires it too.
+  maritalStatus: z.string().trim().min(1, "Select marital status").pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
+  community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
+  education: opt, profession: opt,
+  income: oneOfList(INCOME_RANGES, "Choose an annual income range from the list"),
+  diet: oneOfList(DIETS, "Choose a diet from the list"),
   fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
   prefCommunities: arr.optional(), prefCities: arr.optional(),
   prefEducation: arr.optional(), prefOccupation: arr.optional(), prefCountries: arr.optional(),
-  prefAgeMin: num, prefAgeMax: num, prefIncomeMin: opt, prefNotes: opt,
-  motherTongue: opt, fatherName: opt, motherName: opt, familyType: opt, createdBy: opt,
-  prefHeightMinCm: num, prefMaritalStatus: opt, prefRelocate: opt,
+  prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
+  prefIncomeMin: oneOfList(INCOME_RANGES, "Choose a minimum income from the list"),
+  motherTongue: opt, fatherName: opt, motherName: opt, createdBy: opt,
+  familyType: oneOfList(FAMILY_TYPES, "Choose a family type from the list"),
+  prefHeightMinCm: num,
+  prefMaritalStatus: oneOfList(MARITAL_STATUSES, "Choose a marital status from the list"),
+  prefRelocate: oneOfList(RELOCATE, "Choose whether they are willing to relocate"),
   consent: bool.refine((v) => v, "Consent is required to submit your bio data"),
 });
 
@@ -115,6 +135,9 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
   if (v.familyPhone) {
     const f = checkPhone(v.familyPhone, (v.familyPhoneCountry ?? v.phoneCountry ?? country) as CountryCode);
     if (!f.ok) ctx.addIssue({ code: "custom", path: ["familyPhone"], message: f.error }); else out.familyPhone = f.value;
+  }
+  if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
+    ctx.addIssue({ code: "custom", path: ["prefAgeMax"], message: "The maximum age must be more than the minimum age" });
   }
   if (v.city) {
     const hit = verifyCity(country, v.city, v.state);
