@@ -89,7 +89,10 @@ const intakeBase = z.object({
   email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
   familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
   idProofType: z.string().trim().toUpperCase().pipe(z.enum(ID_PROOF_TYPES, { message: "Choose the type of ID proof" })).optional().or(z.literal("").transform(() => undefined)),
-  heightCm: num,
+  // The web forms only offer a 4'6"-7'0" dropdown, so the range is enforced here too: it is the
+  // API, not the form, that has to reject a nonsense height from a webhook or a direct call.
+  heightCm: z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)),
+    z.number().int("Enter the height in whole centimetres").min(120, "Enter a height of 120 cm or more").max(250, "Enter a height of 250 cm or less").optional()),
   weightKg: weightKgField,
   birthTime: birthTimeField, birthPlace: opt,
   maritalStatus: opt, community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
