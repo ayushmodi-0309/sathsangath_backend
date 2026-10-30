@@ -5,7 +5,7 @@
  * Stored format: India keeps the plain 10-digit number (existing data and logins);
  * every other country is stored as +<dialcode><national number>.
  */
-export type CountryCode = "IN" | "US" | "GB" | "CA" | "AU" | "AE" | "NZ";
+export type CountryCode = "IN" | "US" | "GB" | "CA" | "AU" | "AE" | "NZ" | "UG";
 
 export const PHONE_RULES: Record<CountryCode, { name: string; dial: string; national: RegExp; stripZero: boolean; example: string }> = {
   IN: { name: "India", dial: "91", national: /^[6-9]\d{9}$/, stripZero: false, example: "98765 43210" },
@@ -15,6 +15,9 @@ export const PHONE_RULES: Record<CountryCode, { name: string; dial: string; nati
   AU: { name: "Australia", dial: "61", national: /^4\d{8}$/, stripZero: true, example: "0412 345 678" },
   AE: { name: "United Arab Emirates", dial: "971", national: /^5\d{8}$/, stripZero: true, example: "050 123 4567" },
   NZ: { name: "New Zealand", dial: "64", national: /^2\d{7,9}$/, stripZero: true, example: "021 123 4567" },
+  // Uganda's national significant number is nine digits (ITU-T corrigendum for country code 256),
+  // and mobiles are the ones beginning with 7 — written locally as 07 plus eight digits.
+  UG: { name: "Uganda", dial: "256", national: /^7\d{8}$/, stripZero: true, example: "0742 920869" },
 };
 export const COUNTRY_CODES = Object.keys(PHONE_RULES) as CountryCode[];
 export const isCountry = (c: unknown): c is CountryCode => typeof c === "string" && c in PHONE_RULES;
