@@ -24,8 +24,26 @@ export const isCountry = (c: unknown): c is CountryCode => typeof c === "string"
 
 export type PhoneResult = { ok: true; value: string; country: CountryCode } | { ok: false; error: string };
 
+/**
+ * A stand-in for a member whose real mobile is missing from their bio data, or so contradictory
+ * that storing it would be worse than storing nothing. Phone is required and unique, so these
+ * members could not otherwise be created at all.
+ *
+ * Six leading zeros then a counter, e.g. 0000000001. No real number in any supported country can
+ * look like this, since every national rule requires a non-zero first digit. They are distinct so
+ * the unique column is satisfied, and they share a prefix so one admin search for "000000" lists
+ * every member still waiting for a real number.
+ */
+export const PLACEHOLDER_PHONE_RE = /^0{6}\d{4}$/;
+export const isPlaceholderPhone = (raw: string) => PLACEHOLDER_PHONE_RE.test(raw.replace(/\D/g, ""));
+
 /** Validates `raw` for `country` (digits, spaces, dashes and a leading +dialcode are all accepted). */
 export function checkPhone(raw: string, country: CountryCode): PhoneResult {
+  // Checked before the country rules, and returned verbatim rather than given a dial code, so the
+  // stored value stays searchable as plain zeros. Deliberately also ahead of the PHONE_RULES
+  // lookup, so a placeholder works even for a country this build does not know.
+  const asTyped = raw.replace(/\D/g, "");
+  if (isPlaceholderPhone(asTyped)) return { ok: true, value: asTyped, country };
   const rule = PHONE_RULES[country];
   const hasPlus = raw.trim().startsWith("+");
   let digits = raw.replace(/\D/g, "");
