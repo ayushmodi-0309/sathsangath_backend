@@ -1,5 +1,5 @@
 import { prisma } from "./db";
-import { ageFrom, list } from "./util";
+import { ageFrom } from "./util";
 
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
@@ -89,12 +89,12 @@ export async function suggestionsFor(viewerId: string) {
 }
 
 /**
- * Curated feed for one viewer:
- *  - opposite gender, APPROVED only
- *  - admin overrides win (SHOW forces in, HIDE forces out)
- *  - otherwise the profile must satisfy the viewer's stated preferences against the tags the
- *    admin applied (Community / City), falling back to submitted values, plus the age range.
- * An empty preference means "no restriction" for that criterion.
+ * The feed for one viewer: every APPROVED profile of the opposite gender, newest approval first.
+ *
+ * The viewer's stored partner preferences are deliberately NOT applied here. Narrowing the feed
+ * by them left members with very little to look at and no way to tell why, so the feed starts
+ * wide and the member narrows it themselves with the filters on the Feed screen, which arrive as
+ * `filters`. Preferences are still recorded on the profile for the admin team to match on.
  */
 export async function matchesFor(viewerId: string, filters?: FeedFilters) {
   const feed = await curatedFeed(viewerId);
@@ -104,11 +104,9 @@ export async function matchesFor(viewerId: string, filters?: FeedFilters) {
 }
 
 async function curatedFeed(viewerId: string) {
-  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId } });
-  const overrides = await prisma.visibilityOverride.findMany({ where: { viewerId } });
-  const hide = new Set(overrides.filter((o) => o.action === "HIDE").map((o) => o.profileId));
-  const suggested = await suggestionsFor(viewerId);
-  const show = new Set([...overrides.filter((o) => o.action === "SHOW").map((o) => o.profileId), ...suggested.keys()]);
+  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true } });
+  const hidden = await prisma.visibilityOverride.findMany({ where: { viewerId, action: "HIDE" }, select: { profileId: true } });
+  const hide = new Set(hidden.map((o) => o.profileId));
 
   const candidates = await prisma.member.findMany({
     where: { status: "APPROVED", id: { not: viewerId }, gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },
@@ -116,29 +114,9 @@ async function curatedFeed(viewerId: string) {
     orderBy: { approvedAt: "desc" },
   });
 
-  // TEMPORARILY DISABLED: preference-based filtering (community, city, age range).
-  // All approved opposite-gender profiles are returned regardless of viewer preferences.
-  // Re-enable by uncommenting the block below.
-  // const wantComm = list(viewer.prefCommunities).map((s) => s.toLowerCase());
-  // const wantCity = list(viewer.prefCities).map((s) => s.toLowerCase());
-  // const now = Date.now();
-  // return candidates.filter((c) => {
-  //   if (hide.has(c.id)) return false;
-  //   if (show.has(c.id)) return true;
-  //   const tagVals = (cat: string) =>
-  //     c.tags.filter((t) => t.tagValue.category.name.toLowerCase() === cat).map((t) => t.tagValue.value.toLowerCase());
-  //   const comm = tagVals("community"); if (!comm.length && c.community) comm.push(c.community.toLowerCase());
-  //   const city = tagVals("city"); if (!city.length && c.city) city.push(c.city.toLowerCase());
-  //   if (wantComm.length && !comm.some((x) => wantComm.includes(x))) return false;
-  //   if (wantCity.length && !city.some((x) => wantCity.includes(x))) return false;
-  //   const age = Math.floor((now - c.dob.getTime()) / 31557600000);
-  //   if (viewer.prefAgeMin && age < viewer.prefAgeMin) return false;
-  //   if (viewer.prefAgeMax && age > viewer.prefAgeMax) return false;
-  //   return true;
-  // });
-
-  return candidates.filter((c) => {
-    if (hide.has(c.id)) return false;
-    return true;
-  });
+  // A HIDE override is the only thing that keeps an approved profile out of the feed. SHOW
+  // overrides and admin suggestions no longer affect membership: they existed to push a profile
+  // past the preference filters, and every approved profile is now in the feed to begin with.
+  // Suggestions are still flagged on the items the /matches route returns.
+  return candidates.filter((c) => !hide.has(c.id));
 }

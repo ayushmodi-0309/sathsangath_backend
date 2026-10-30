@@ -12,7 +12,7 @@ import { audit, tempPassword } from "../lib/util";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
-import { createSubmission, intakeSchema, MAX_PHOTO_BYTES, normaliseBirthTime } from "./public";
+import { createSubmission, DIETS, FAMILY_TYPES, INCOME_RANGES, intakeSchema, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, RELOCATE } from "./public";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 import { checkAnyPhone, checkPhone, isCountry, type CountryCode } from "../lib/phone";
 
@@ -253,22 +253,40 @@ const prefList = z.preprocess((v) => {
   return v.trim() ? v.split(",").map((x) => x.trim()).filter(Boolean) : [];
 }, z.array(z.string().trim()).optional());
 
+/**
+ * An optional text field on the edit routes. Clearing one in the admin form sends "", which should
+ * null the column rather than store an empty string, so the field reads as unset everywhere.
+ */
+const clearableText = z.preprocess((v) => (v === "" ? null : v), z.string().trim().nullable());
+/** An optional fixed-choice field: one of `vals`, or "" / null to clear it. */
+const clearableChoice = <T extends readonly [string, ...string[]]>(vals: T) =>
+  z.preprocess((v) => (v === "" ? null : v), z.union([z.null(), z.enum(vals)]));
+
 const editSchema = z.object({
-  fullName: z.string().trim().min(2), phone: z.string().trim(), email: z.string().trim().nullable(),
-  familyPhone: z.string().trim().nullable(), familyEmail: z.string().trim().nullable(),
-  gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(100, 250), maritalStatus: z.string().nullable(),
-  weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: z.string().nullable(),
-  community: z.string().nullable(), subCommunity: z.string().nullable(), city: z.string().nullable(), state: z.string().nullable(),
-  education: z.string().nullable(), profession: z.string().nullable(), income: z.string().nullable(), diet: z.string().nullable(),
-  fatherOccupation: z.string().nullable(), motherOccupation: z.string().nullable(), siblings: z.string().nullable(),
-  familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
-  prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
-  motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
-  nativePlace: z.string().nullable(), prefHeightMinCm: intEdit(100, 250), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
+  fullName: z.string().trim().min(2), phone: z.string().trim(), email: clearableText,
+  familyPhone: clearableText, familyEmail: clearableText,
+  gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(120, 250),
+  maritalStatus: z.string().trim().pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
+  weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
+  community: clearableText, subCommunity: clearableText, city: clearableText, state: clearableText,
+  education: clearableText, profession: clearableText,
+  income: clearableChoice(INCOME_RANGES), diet: clearableChoice(DIETS),
+  fatherOccupation: clearableText, motherOccupation: clearableText, siblings: clearableText,
+  familyBackground: clearableText, about: clearableText, prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
+  prefNotes: clearableText, adminNote: clearableText,
+  motherTongue: clearableText, fatherName: clearableText, motherName: clearableText, createdBy: clearableText,
+  familyType: clearableChoice(FAMILY_TYPES),
+  nativePlace: clearableText, prefHeightMinCm: intEdit(120, 250),
+  prefMaritalStatus: clearableChoice(MARITAL_STATUSES), prefRelocate: clearableChoice(RELOCATE),
   prefCommunities: prefList, prefCities: prefList,
   prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
-  prefIncomeMin: z.string().nullable(),
-}).partial();
+  prefIncomeMin: clearableChoice(INCOME_RANGES),
+}).partial().superRefine((v, ctx) => {
+  // Same rule the public form enforces: an inverted preferred age range is a mistake.
+  if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
+    ctx.addIssue({ code: "custom", path: ["prefAgeMax"], message: "The maximum age must be more than the minimum age" });
+  }
+});
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, ...d } = editSchema.parse(req.body);
