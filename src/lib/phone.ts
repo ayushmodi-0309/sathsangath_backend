@@ -5,7 +5,7 @@
  * Stored format: India keeps the plain 10-digit number (existing data and logins);
  * every other country is stored as +<dialcode><national number>.
  */
-export type CountryCode = "IN" | "US" | "GB" | "CA" | "AU" | "AE" | "NZ";
+export type CountryCode = "IN" | "US" | "GB" | "CA" | "AU" | "AE" | "NZ" | "UG";
 
 export const PHONE_RULES: Record<CountryCode, { name: string; dial: string; national: RegExp; stripZero: boolean; example: string }> = {
   IN: { name: "India", dial: "91", national: /^[6-9]\d{9}$/, stripZero: false, example: "98765 43210" },
@@ -15,14 +15,35 @@ export const PHONE_RULES: Record<CountryCode, { name: string; dial: string; nati
   AU: { name: "Australia", dial: "61", national: /^4\d{8}$/, stripZero: true, example: "0412 345 678" },
   AE: { name: "United Arab Emirates", dial: "971", national: /^5\d{8}$/, stripZero: true, example: "050 123 4567" },
   NZ: { name: "New Zealand", dial: "64", national: /^2\d{7,9}$/, stripZero: true, example: "021 123 4567" },
+  // Uganda's national significant number is nine digits (ITU-T corrigendum for country code 256),
+  // and mobiles are the ones beginning with 7 — written locally as 07 plus eight digits.
+  UG: { name: "Uganda", dial: "256", national: /^7\d{8}$/, stripZero: true, example: "0742 920869" },
 };
 export const COUNTRY_CODES = Object.keys(PHONE_RULES) as CountryCode[];
 export const isCountry = (c: unknown): c is CountryCode => typeof c === "string" && c in PHONE_RULES;
 
 export type PhoneResult = { ok: true; value: string; country: CountryCode } | { ok: false; error: string };
 
+/**
+ * A stand-in for a member whose real mobile is missing from their bio data, or so contradictory
+ * that storing it would be worse than storing nothing. Phone is required and unique, so these
+ * members could not otherwise be created at all.
+ *
+ * Six leading zeros then a counter, e.g. 0000000001. No real number in any supported country can
+ * look like this, since every national rule requires a non-zero first digit. They are distinct so
+ * the unique column is satisfied, and they share a prefix so one admin search for "000000" lists
+ * every member still waiting for a real number.
+ */
+export const PLACEHOLDER_PHONE_RE = /^0{6}\d{4}$/;
+export const isPlaceholderPhone = (raw: string) => PLACEHOLDER_PHONE_RE.test(raw.replace(/\D/g, ""));
+
 /** Validates `raw` for `country` (digits, spaces, dashes and a leading +dialcode are all accepted). */
 export function checkPhone(raw: string, country: CountryCode): PhoneResult {
+  // Checked before the country rules, and returned verbatim rather than given a dial code, so the
+  // stored value stays searchable as plain zeros. Deliberately also ahead of the PHONE_RULES
+  // lookup, so a placeholder works even for a country this build does not know.
+  const asTyped = raw.replace(/\D/g, "");
+  if (isPlaceholderPhone(asTyped)) return { ok: true, value: asTyped, country };
   const rule = PHONE_RULES[country];
   const hasPlus = raw.trim().startsWith("+");
   let digits = raw.replace(/\D/g, "");
