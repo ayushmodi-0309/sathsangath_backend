@@ -269,7 +269,8 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
       ]);
     } else {
       // not mutual yet — notify the liked person
-      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED" });
+      // memberId lets the app open the liker's profile from the notification.
+      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED", memberId: me(req) });
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });
