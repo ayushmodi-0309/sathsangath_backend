@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { StorageProvider } from "./types";
 
@@ -27,6 +27,17 @@ export function createS3Storage(o: S3Options): StorageProvider {
     },
     signedUrl(key, expiresInSec) {
       return getSignedUrl(client, new GetObjectCommand({ Bucket: o.bucket, Key: key }), { expiresIn: expiresInSec });
+    },
+    signedPut(key, contentType, expiresInSec) {
+      return getSignedUrl(client, new PutObjectCommand({ Bucket: o.bucket, Key: key, ContentType: contentType }), { expiresIn: expiresInSec });
+    },
+    async head(key) {
+      try {
+        const r = await client.send(new HeadObjectCommand({ Bucket: o.bucket, Key: key }));
+        return { size: Number(r.ContentLength ?? 0), contentType: r.ContentType };
+      } catch {
+        return null; // missing, or no permission to see it
+      }
     },
   };
 }
