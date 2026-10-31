@@ -123,7 +123,7 @@ model MembershipPlan {
   id        String   @id @default(cuid())
   memberId  String
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  plan      String   // BASIC | PRO
+  plan      String   // DIKRI | DIKRA | SIGNATURE (older rows may say BASIC | PRO)
   startDate DateTime
   endDate   DateTime
   note      String?

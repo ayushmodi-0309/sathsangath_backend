@@ -67,7 +67,7 @@ const listQuery = z.object({
   hasIdProof: z.enum(["true", "false"]).optional(),
   hasAccount: z.enum(["true", "false"]).optional(),
   expiringSoon: z.enum(["true"]).optional(),
-  plan: z.enum(["FREE", "BASIC", "PRO"]).optional(),
+  plan: z.enum(["FREE", "DIKRI", "DIKRA", "SIGNATURE", "BASIC", "PRO"]).optional(),
   // pagination + sort
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20),
   sort: z.enum(["profileCode","fullName","dob","city","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
@@ -113,8 +113,7 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
     w.membershipPlans = { some: { endDate: { lte: in30, gte: new Date() } } };
   }
   if (q.plan === "FREE") w.membershipPlans = { none: { endDate: { gte: new Date() } } };
-  if (q.plan === "BASIC") w.membershipPlans = { some: { plan: "BASIC", endDate: { gte: new Date() } } };
-  if (q.plan === "PRO")   w.membershipPlans = { some: { plan: "PRO",   endDate: { gte: new Date() } } };
+  if (q.plan && q.plan !== "FREE") w.membershipPlans = { some: { plan: q.plan, endDate: { gte: new Date() } } };
   return w;
 }
 void tri; // suppress unused warning — may be used in future
@@ -533,7 +532,7 @@ adminRouter.get("/members/:id/document", wrap(async (req, res) => {
 
 // ---------- Membership ----------
 const membershipSchema = z.object({
-  plan:      z.enum(["BASIC", "PRO"]),
+  plan:      z.enum(["DIKRI", "DIKRA", "SIGNATURE"]),
   startDate: z.string().datetime(),
   endDate:   z.string().datetime(),
   note:      z.string().trim().max(300).optional(),
