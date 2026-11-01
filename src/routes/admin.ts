@@ -538,6 +538,50 @@ const membershipSchema = z.object({
   note:      z.string().trim().max(300).optional(),
 });
 
+/**
+ * Everything our team has done to this member, newest first — the audit trail
+ * for one profile.
+ *
+ * Admin actions are recorded against entity "Member" with the member's id, so
+ * this is that slice of the audit log. `detail` is handed over as the stored
+ * JSON string; the caller decides what of it is worth showing.
+ */
+/**
+ * What the member did to their own profile that a reviewer needs to see.
+ *
+ * Deliberately not everything they do: logins and likes would bury the few
+ * entries that matter when deciding whether a correction was answered.
+ */
+const MEMBER_ACTIONS_WORTH_SHOWING = [
+  "SUBMITTED_BIODATA", "RESUBMITTED", "UPDATED_PROFILE",
+  "UPDATED_CONTACT_DETAILS", "UPLOADED_PHOTOS", "DELETED_PHOTO", "CHANGED_MAIN_PHOTO",
+];
+
+adminRouter.get("/members/:id/history", wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      OR: [
+        // Admin actions are recorded against the member as the entity...
+        { entity: "Member", entityId: id, actorType: "ADMIN" },
+        // ...the member's own against memberId, whatever entity they touched.
+        { memberId: id, actorType: "MEMBER", action: { in: MEMBER_ACTIONS_WORTH_SHOWING } },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+    include: { admin: { select: { name: true } } },
+  });
+  res.json(rows.map((r) => ({
+    id: r.id,
+    action: r.action,
+    actorType: r.actorType,
+    admin: r.admin?.name ?? r.actorName ?? (r.actorType === "MEMBER" ? "The member" : "System"),
+    detail: r.detail,
+    createdAt: r.createdAt,
+  })));
+}));
+
 adminRouter.get("/members/:id/membership", wrap(async (req, res) => {
   const rows = await prisma.membershipPlan.findMany({
     where: { memberId: pid(req.params.id) },

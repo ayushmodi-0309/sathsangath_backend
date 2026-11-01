@@ -120,6 +120,62 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   res.json(await toSelf(await prisma.member.findUniqueOrThrow({ where: { id: m.id }, include: includeTags })));
 }));
 
+/**
+ * "I have made the changes" — hands the bio data back for review.
+ *
+ * Correcting a profile is self-service: the member can already edit it, but
+ * until now there was no way to say they were done, so a corrected profile sat
+ * in the Correction queue until somebody happened to look. Moving it back to
+ * PENDING puts it in the normal review queue, which is where the team works
+ * from, and clears the note so a stale request is not shown next to a profile
+ * that has already answered it.
+ */
+memberRouter.post("/resubmit", wrap(async (req, res) => {
+  const m = await loadMe(me(req));
+  if (m.status !== "CORRECTION") {
+    throw new HttpError(409, "There is nothing waiting to be corrected.");
+  }
+  const updated = await prisma.member.update({
+    where: { id: m.id },
+    data: { status: "PENDING", adminNote: null },
+    include: includeTags,
+  });
+  await activity(who(m), "RESUBMITTED", "Member", m.id);
+  res.json(await toSelf(updated));
+}));
+
+/**
+ * Every correction our team has asked this member for, newest first.
+ *
+ * Read back out of the audit log rather than kept on the member, because
+ * adminNote only ever holds the latest one. Only the note and the date are
+ * handed over: the stored detail also records who delivered it and whether the
+ * email and SMS went through, which is ours, not theirs.
+ */
+memberRouter.get("/corrections", wrap(async (req, res) => {
+  const rows = await prisma.auditLog.findMany({
+    where: { entity: "Member", entityId: me(req), action: "REQUEST_CORRECTION" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, detail: true, createdAt: true },
+  });
+  res.json(
+    rows
+      .map((r) => ({ id: r.id, note: noteOf(r.detail), askedAt: r.createdAt }))
+      .filter((r) => r.note),
+  );
+}));
+
+/** The member-facing `note` out of an audit row's JSON detail, if it has one. */
+function noteOf(detail: string | null): string {
+  if (!detail) return "";
+  try {
+    const d = JSON.parse(detail) as { note?: unknown };
+    return typeof d.note === "string" ? d.note : "";
+  } catch {
+    return "";
+  }
+}
+
 memberRouter.get("/summary", wrap(async (req, res) => {
   const [notifications, announcements] = await Promise.all([
     prisma.notification.count({ where: { audience: "MEMBER", memberId: me(req), read: false } }),
