@@ -193,9 +193,12 @@ memberRouter.get("/matches", wrap(async (req, res) => {
     suggestionsFor(me(req)),
   ]);
   const liked = new Set(likes.map((l) => l.likedId));
-  const slice = all.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
+  // Mutual matches are not part of the browse feed — they live in the Interests tab.
+  // Filtered here rather than in matchesFor(), which also backs profile visibility.
+  const feed = all.filter((m) => !mutual.has(m.id));
+  const slice = feed.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
   res.json({
-    total: all.length, page: q.page, pageSize: q.pageSize,
+    total: feed.length, page: q.page, pageSize: q.pageSize,
     items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id), suggested: suggested.has(m.id) }))),
   });
 }));
@@ -266,7 +269,8 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
       ]);
     } else {
       // not mutual yet — notify the liked person
-      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED" });
+      // memberId lets the app open the liker's profile from the notification.
+      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED", memberId: me(req) });
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });

@@ -25,11 +25,32 @@ export const storage: StorageProvider = {
   put: (k, b, c) => (instance ??= createStorage()).put(k, b, c),
   delete: (k) => (instance ??= createStorage()).delete(k),
   signedUrl: (k, e) => (instance ??= createStorage()).signedUrl(k, e),
+  signedPut: (k, c, e) => (instance ??= createStorage()).signedPut(k, c, e),
+  head: (k) => (instance ??= createStorage()).head(k),
 };
 
 /** Random, unguessable object key, e.g. photos/3fa9....jpg */
 export const newKey = (kind: "photos" | "docs", originalName: string) =>
   `${kind}/${crypto.randomBytes(16).toString("hex")}${path.extname(originalName).toLowerCase()}`;
+
+/**
+ * Key for an object a browser will upload directly, namespaced by its owner so
+ * the submission can prove we issued it. e.g. photos/<accountId>/3fa9....jpg
+ */
+export const newScopedKey = (kind: "photos" | "docs", ownerId: string, ext: string) =>
+  `${kind}/${ownerId}/${crypto.randomBytes(16).toString("hex")}${ext}`;
+
+/**
+ * True when `key` has the exact shape we hand out for this owner.
+ *
+ * The trailing segment is matched strictly, so a caller cannot smuggle in a
+ * path separator or traversal and claim someone else's object.
+ */
+export function ownsKey(key: string, kind: "photos" | "docs", ownerId: string): boolean {
+  const prefix = `${kind}/${ownerId}/`;
+  if (!key.startsWith(prefix)) return false;
+  return /^[0-9a-f]{32}\.[a-z0-9]{2,5}$/.test(key.slice(prefix.length));
+}
 
 /** Stores a multer memory file and returns its object key. */
 export async function saveUpload(kind: "photos" | "docs", file: Express.Multer.File) {
