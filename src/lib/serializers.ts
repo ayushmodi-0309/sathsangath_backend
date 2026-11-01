@@ -89,6 +89,10 @@ export async function toSelf(m: FullMember) {
     religion: m.religion, country: m.country,
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
     dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
+    // What our team asked the member to change. adminNote is also used to record
+    // why an account was suspended or restricted, which is internal, so it is
+    // only handed over for the statuses where it was written for the member.
+    adminNote: m.status === "CORRECTION" || m.status === "REJECTED" ? m.adminNote : null,
     prefs: {
       communities: list(m.prefCommunities), cities: list(m.prefCities),
       education: list(m.prefEducation), occupation: list(m.prefOccupation),
