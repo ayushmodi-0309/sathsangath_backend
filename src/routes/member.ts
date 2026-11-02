@@ -273,7 +273,20 @@ async function loadVisible(viewerId: string, profileId: string) {
 }
 
 memberRouter.get("/profiles/:id", wrap(async (req, res) => {
-  const { p, isMutual } = await loadVisible(me(req), String(req.params.id));
+  const viewerId = me(req);
+  const profileId = String(req.params.id);
+  /** Own profile preview: full detail like a mutual view, but not a mutual *match*. */
+  let p: Awaited<ReturnType<typeof loadVisible>>["p"];
+  let isMutual: boolean;
+  const isSelf = viewerId === profileId;
+  if (isSelf) {
+    const row = await prisma.member.findFirst({ where: { id: profileId }, include: includeTags });
+    if (!row) throw new HttpError(404, "This profile is not available.");
+    p = row;
+    isMutual = false;
+  } else {
+    ({ p, isMutual } = await loadVisible(viewerId, profileId));
+  }
   const [like, introByMe, introByThem, sug] = await Promise.all([
     prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
@@ -283,11 +296,16 @@ memberRouter.get("/profiles/:id", wrap(async (req, res) => {
   // Viewer sees contact details when either party's intro request was facilitated
   const activeIntro = introByMe ?? introByThem;
   const contactVisible = activeIntro?.status === "INTRODUCTION_FACILITATED";
-  const serialized = contactVisible ? await toContactProfile(p) : isMutual ? await toMutualProfile(p) : await toPublicProfile(p);
+  const revealFull = isMutual || isSelf;
+  const serialized = contactVisible ? await toContactProfile(p) : revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
   res.json({
-    ...serialized, liked: !!like, mutual: isMutual, suggested: !!sug, suggestionNote: sug?.note ?? null,
-    introduction: activeIntro ? { status: activeIntro.status, label: STATUS_LABEL[activeIntro.status] } : null,
-    contactVisible,
+    ...serialized,
+    liked: isSelf ? false : !!like,
+    mutual: isMutual,
+    suggested: isSelf ? false : !!sug,
+    suggestionNote: isSelf ? null : sug?.note ?? null,
+    introduction: isSelf ? null : activeIntro ? { status: activeIntro.status, label: STATUS_LABEL[activeIntro.status] } : null,
+    contactVisible: isSelf ? false : contactVisible,
   });
 }));
 

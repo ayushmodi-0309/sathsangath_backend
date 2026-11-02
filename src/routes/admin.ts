@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/db";
+import { sendPush } from "../lib/fcm";
 import { HttpError, paging, wrap } from "../lib/http";
 import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
@@ -73,14 +74,34 @@ const listQuery = z.object({
   sort: z.enum(["profileCode","fullName","dob","city","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
   order: z.enum(["asc","desc"]).default("desc"),
 });
+
+/** Comma-separated filter values → match any (OR). Single value stays on `w` for a simpler query plan. */
+function applyMultiContains(
+  w: Prisma.MemberWhereInput,
+  and: Prisma.MemberWhereInput[],
+  field: "city" | "community" | "subCommunity",
+  raw?: string,
+) {
+  if (!raw) return;
+  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return;
+  if (parts.length === 1) {
+    w[field] = { contains: parts[0], mode: "insensitive" };
+  } else {
+    and.push({ OR: parts.map((p) => ({ [field]: { contains: p, mode: "insensitive" } })) });
+  }
+}
+
 function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   const w: Prisma.MemberWhereInput = {};
+  const and: Prisma.MemberWhereInput[] = [];
   if (q.status) w.status = q.status;
   if (q.gender) w.gender = q.gender;
-  if (q.city) w.city = { contains: q.city, mode: "insensitive" };
-  if (q.community) w.community = { contains: q.community, mode: "insensitive" };
+  applyMultiContains(w, and, "city", q.city);
+  applyMultiContains(w, and, "community", q.community);
+  applyMultiContains(w, and, "subCommunity", q.subCommunity);
   if (q.tag) w.tags = { some: { tagValueId: q.tag } };
-  if (q.q) w.OR = [{ fullName: { contains: q.q, mode: "insensitive" } }, { phone: { contains: q.q } }, { email: { contains: q.q, mode: "insensitive" } }, { profileCode: { contains: q.q, mode: "insensitive" } }];
+  if (q.q) and.push({ OR: [{ fullName: { contains: q.q, mode: "insensitive" } }, { phone: { contains: q.q } }, { email: { contains: q.q, mode: "insensitive" } }, { profileCode: { contains: q.q, mode: "insensitive" } }] });
   const now = new Date();
   if (q.ageMin) w.dob = { ...(w.dob as object), lte: new Date(now.getFullYear() - q.ageMin, now.getMonth(), now.getDate()) };
   if (q.ageMax) w.dob = { ...(w.dob as object), gte: new Date(now.getFullYear() - q.ageMax - 1, now.getMonth(), now.getDate()) };
@@ -99,7 +120,6 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   if (q.religion)     w.religion = { contains: q.religion, mode: "insensitive" };
   if (q.motherTongue) w.motherTongue = { contains: q.motherTongue, mode: "insensitive" };
   if (q.familyType)   w.familyType = q.familyType;
-  if (q.subCommunity) w.subCommunity = { contains: q.subCommunity, mode: "insensitive" };
   if (q.source)       w.source = q.source;
   if (q.createdBy)    w.createdBy = q.createdBy;
   if (q.hasPhoto === "true")  w.photoUrl = { not: null };
@@ -114,6 +134,7 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   }
   if (q.plan === "FREE") w.membershipPlans = { none: { endDate: { gte: new Date() } } };
   if (q.plan && q.plan !== "FREE") w.membershipPlans = { some: { plan: q.plan, endDate: { gte: new Date() } } };
+  if (and.length) w.AND = and;
   return w;
 }
 void tri; // suppress unused warning — may be used in future
@@ -416,6 +437,9 @@ adminRouter.post("/members/:id/correction", wrap(async (req, res) => {
   const { note } = z.object({ note: z.string().trim().min(5, "Tell the member what to correct") }).parse(req.body);
   const m = await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "CORRECTION", adminNote: note } });
   const delivery = await sendCorrection(m, note);
+  // Email and SMS are easy to miss; the app can act on it directly. The note
+  // itself is the body, so the member sees what to change on the lock screen.
+  await sendPush(m.fcmToken, "A correction is needed", note, { type: "CORRECTION" });
   await audit(adminId(req), "REQUEST_CORRECTION", "Member", m.id, { note, delivery });
   res.json({ ok: true, delivery });
 }));
