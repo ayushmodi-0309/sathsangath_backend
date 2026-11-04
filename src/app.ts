@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import { config } from "./lib/config";
+import { logger } from "./lib/logger";
 import { errorHandler } from "./lib/http";
 import { publicRouter } from "./routes/public";
 import { authRouter } from "./routes/auth";
@@ -22,7 +23,9 @@ const corsOptions: cors.CorsOptions = {
   maxAge: 86400,
 };
 app.use(cors(corsOptions));
-app.use(morgan("tiny"));
+app.use(morgan("tiny", {
+  stream: { write: (line) => logger.info(line.trim(), { source: "http" }) },
+}));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_r, res) => res.json({ ok: true }));

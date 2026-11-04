@@ -44,4 +44,10 @@ export const config = {
     endpoint: process.env.STORAGE_ENDPOINT ?? process.env.CLOUDFLARE_S3_API_ENDPOINT ?? undefined,
     urlTtl: Number(process.env.STORAGE_URL_TTL ?? 3600),
   },
+  posthog: {
+    /** Project token (phc_…). Empty leaves the PostHog logger uninitialized. */
+    apiKey: (process.env.POSTHOG_API_KEY ?? "").trim(),
+    /** US cloud by default. EU projects set POSTHOG_HOST=https://eu.i.posthog.com. */
+    host: (process.env.POSTHOG_HOST ?? "https://us.i.posthog.com").trim().replace(/\/+$/, ""),
+  },
 };
