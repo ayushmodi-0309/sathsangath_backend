@@ -25,7 +25,10 @@ authRouter.post("/login", loginLimiter, wrap(async (req, res) => {
     throw new HttpError(401, "Incorrect mobile number / Member ID or password.");
   }
   if (m.status === "SUSPENDED") throw new HttpError(403, "Your account is suspended. Please contact Sathsangath.");
-  if (m.status !== "APPROVED") throw new HttpError(403, "Your bio data is still under review.");
+  if (m.status === "REJECTED") throw new HttpError(403, "Your bio data could not be taken forward. Please contact Sathsangath.");
+  // A profile waiting for review (or for a correction) can still sign in: they may fill in their bio
+  // data, add photos and look around. The actions that need approval - liking, liking back, asking
+  // for an introduction - are gated server-side by requireApproved, not by the login.
   await prisma.member.update({ where: { id: m.id }, data: { lastLoginAt: new Date() } });
   await activity({ type: "MEMBER", memberId: m.id, name: memberLabel(m) }, "LOGIN", "Member", m.id);
   res.json({ token: signToken({ kind: "member", id: m.id }), member: await toSelf(m) });
