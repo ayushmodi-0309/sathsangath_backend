@@ -17,11 +17,21 @@ const passwordRule = z.string().min(8, "Use at least 8 characters").regex(/[A-Za
 
 // Member login: mobile number OR profile code + password
 authRouter.post("/login", loginLimiter, wrap(async (req, res) => {
-  const { username, password } = z.object({ username: z.string().trim().min(3, "Enter your mobile number or Member ID"), password: z.string().min(1, "Enter your password") }).parse(req.body);
-  const u = username.toUpperCase().startsWith("SS-") ? { profileCode: username.toUpperCase() } : { phone: normPhone(username) };
-  const m = await prisma.member.findUnique({ where: u, include: includeTags });
-  if (!m?.passwordHash || !(await bcrypt.compare(password, m.passwordHash))) {
-    await activity({ type: "PUBLIC", name: username }, "FAILED_LOGIN", "Member", m?.id);
+  const { username, password } = z.object({ username: z.string().trim().min(3, "Enter your mobile number, Member ID or email"), password: z.string().min(1, "Enter your password") }).parse(req.body);
+  // Three ways to name yourself: Member ID, mobile number, or the email on the profile.
+  const where = username.toUpperCase().startsWith("SS-")
+    ? { profileCode: username.toUpperCase() }
+    : username.includes("@")
+      ? { email: { equals: username, mode: "insensitive" as const } }
+      : { phone: normPhone(username) };
+  // profileCode and phone are unique, but email is not, so an email may name more than one
+  // profile. Pick the one whose password matches instead of guessing - that also avoids telling
+  // an outsider which addresses are shared.
+  const candidates = await prisma.member.findMany({ where, include: includeTags, take: 5 });
+  let m: (typeof candidates)[number] | undefined;
+  for (const c of candidates) if (c.passwordHash && (await bcrypt.compare(password, c.passwordHash))) { m = c; break; }
+  if (!m) {
+    await activity({ type: "PUBLIC", name: username }, "FAILED_LOGIN", "Member", candidates.length === 1 ? candidates[0].id : undefined);
     throw new HttpError(401, "Incorrect mobile number / Member ID or password.");
   }
   if (m.status === "SUSPENDED") throw new HttpError(403, "Your account is suspended. Please contact Sathsangath.");
