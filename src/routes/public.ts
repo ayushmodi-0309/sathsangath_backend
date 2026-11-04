@@ -37,12 +37,16 @@ const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)),
 const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v === "1", z.boolean());
 
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
+
+/** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
+export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "Work visa", "Student visa", "Dependent / spouse visa", "Business visa", "Visitor visa", "Other"] as const;
+const NO_EXPIRY_VISA = "Citizen";
 /**
  * The fixed choices the web forms offer as dropdowns (frontend/lib/geo.ts and the form files).
  * They are enumerated here too so the API, not the form, is what rejects a value off the list.
  */
 export const MARITAL_STATUSES = ["Never married", "Divorced", "Widowed", "Awaiting divorce"] as const;
-export const DIETS = ["Vegetarian", "Jain vegetarian", "Eggetarian", "Non-vegetarian"] as const;
+export const DIETS = ["Vegetarian", "Jain vegetarian", "Eggetarian", "Non-vegetarian", "Vegan", "veg. + non-veg."] as const;
 export const FAMILY_TYPES = ["Joint family", "Nuclear family"] as const;
 export const RELOCATE = ["Yes", "Maybe", "No"] as const;
 export const INCOME_RANGES = ["\u20b91\u20133 lakh", "\u20b93\u20135 lakh", "\u20b95\u20137 lakh", "\u20b97\u201310 lakh", "\u20b910\u201315 lakh", "\u20b915\u201320 lakh", "\u20b920\u201330 lakh", "\u20b930\u201350 lakh", "\u20b950 lakh\u20131 crore", "\u20b91 crore+"] as const;
@@ -100,6 +104,8 @@ const intakeBase = z.object({
   familyPhone: optPhoneRaw,
   email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
   familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => undefined)),
+  visaType: z.string().trim().max(80).optional().or(z.literal("").transform(() => undefined)),
+  visaExpiry: z.string().trim().optional().or(z.literal("").transform(() => undefined)),
   idProofType: z.string().trim().toUpperCase().pipe(z.enum(ID_PROOF_TYPES, { message: "Choose the type of ID proof" })).optional().or(z.literal("").transform(() => undefined)),
   // The web forms only offer a 4'6"-7'0" dropdown, so the range is enforced here too: it is the
   // API, not the form, that has to reject a nonsense height from a webhook or a direct call.
@@ -156,13 +162,27 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, ...rest } = input;
+  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType, visaExpiry, ...rest } = input;
+  // Living outside India: the visa or status and when it expires are required when people register themselves.
+  // Admin entry may leave them empty (the office often does not have them yet).
+  let visaExpiryDate: Date | undefined;
+  if (rest.country && rest.country !== "IN") {
+    if (source === "WEB" && !visaType) throw new HttpError(422, "Tell us which visa or status you have.", { fields: { visaType: "Choose your visa or status" } });
+    if (visaType && visaType !== NO_EXPIRY_VISA) {
+      const d = visaExpiry ? new Date(visaExpiry) : null;
+      if (d && isNaN(d.getTime())) throw new HttpError(422, "Enter a valid visa expiry date.", { fields: { visaExpiry: "Enter a valid expiry date" } });
+      if (source === "WEB" && !d) throw new HttpError(422, "Tell us when your visa or status expires.", { fields: { visaExpiry: "Enter the date your visa or status expires" } });
+      if (source === "WEB" && d && d.getTime() < Date.now()) throw new HttpError(422, "That visa expiry date has already passed.", { fields: { visaExpiry: "The expiry date must be in the future" } });
+      visaExpiryDate = d ?? undefined;
+    }
+  }
   if (!dob) throw new HttpError(422, "Enter a date of birth or age.", { fields: { dob: "Enter a date of birth or age" } });
   const { photoUrls, ...fileFields } = files ?? {};
   const photoList = photoUrls?.length ? photoUrls : fileFields.photoUrl ? [fileFields.photoUrl] : [];
   const created = await prisma.member.create({
     data: {
       ...rest, dob: new Date(dob), dobIsApproximate: dobIsApproximate ?? false, source, consentGiven: consent,
+      ...(rest.country && rest.country !== "IN" && visaType && { visaType, visaExpiry: visaExpiryDate ?? null }),
       profileCode: await nextProfileCode(),
       prefCommunities: (prefCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
       prefEducation: (prefEducation ?? []).join(","), prefOccupation: (prefOccupation ?? []).join(","),

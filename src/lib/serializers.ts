@@ -5,7 +5,7 @@ import { resolveUrl } from "./storage";
 function activePlan(plans: MembershipPlan[]): MembershipPlan | null {
   const now = new Date();
   return plans
-    .filter((p) => p.startDate <= now && p.endDate >= now)
+    .filter((p) => p.startDate <= now && (p.endDate === null || p.endDate >= now))
     .sort((a, b) => b.startDate.getTime() - a.startDate.getTime())[0] ?? null;
 }
 
@@ -46,6 +46,7 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
     motherTongue: m.motherTongue,
     familyType: m.familyType,
     nativePlace: m.nativePlace, // public: members can filter by it
+    visaType: m.visaType, // only the kind of visa or status; the expiry date and the document stay private
     // Other members see only the main photo until both have liked each other.
     photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos ?? []) }),
   };
@@ -89,6 +90,7 @@ export async function toSelf(m: FullMember) {
     religion: m.religion, country: m.country,
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
     dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
+    visaType: m.visaType, visaExpiry: m.visaExpiry,
     // What our team asked the member to change. adminNote is also used to record
     // why an account was suspended or restricted, which is internal, so it is
     // only handed over for the statuses where it was written for the member.

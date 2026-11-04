@@ -78,6 +78,8 @@ model Member {
   biodataFileUrl     String?  // admin-only original document
   idProofType        String?  // AADHAAR | GREEN_CARD | VISA | PASSPORT | OTHER (private, admin only)
   idProofUrl         String?  // storage key of the ID proof (private, admin only)
+  visaType           String?  // for members living outside India: Citizen | Permanent resident | Work visa ... Other members see this once approved
+  visaExpiry         DateTime? // when that visa/status expires (private, admin only)
 
   // --- partner preferences (comma separated lists) ---
   prefCommunities    String   @default("")
@@ -125,7 +127,7 @@ model MembershipPlan {
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
   plan      String   // DIKRI | DIKRA | SIGNATURE (older rows may say BASIC | PRO)
   startDate DateTime
-  endDate   DateTime
+  endDate   DateTime? // optional: an open-ended membership has no end date
   note      String?
   createdBy String?  // admin name/email who assigned it
   createdAt DateTime @default(now())
