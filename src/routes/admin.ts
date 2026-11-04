@@ -132,8 +132,9 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
     const in30 = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     w.membershipPlans = { some: { endDate: { lte: in30, gte: new Date() } } };
   }
-  if (q.plan === "FREE") w.membershipPlans = { none: { endDate: { gte: new Date() } } };
-  if (q.plan && q.plan !== "FREE") w.membershipPlans = { some: { plan: q.plan, endDate: { gte: new Date() } } };
+  const running = { startDate: { lte: new Date() }, OR: [{ endDate: null }, { endDate: { gte: new Date() } }] }; // started and not ended (no end date = open-ended)
+  if (q.plan === "FREE") w.membershipPlans = { none: running };
+  if (q.plan && q.plan !== "FREE") w.membershipPlans = { some: { plan: q.plan, ...running } };
   if (and.length) w.AND = and;
   return w;
 }
@@ -301,6 +302,7 @@ const editSchema = z.object({
   prefCommunities: prefList, prefCities: prefList,
   prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
   prefIncomeMin: clearableChoice(INCOME_RANGES),
+  visaType: clearableText, visaExpiry: clearableText,
 }).partial().superRefine((v, ctx) => {
   // Same rule the public form enforces: an inverted preferred age range is a mistake.
   if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
@@ -308,8 +310,18 @@ const editSchema = z.object({
   }
 });
 
+/** Admin edit of the visa expiry: undefined = untouched, null = cleared, Date = new value. */
+function visaExpiryValue(v: string | null | undefined): Date | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null || v === "") return null;
+  const d = new Date(v);
+  if (isNaN(d.getTime())) throw new HttpError(422, "Enter a valid visa expiry date.", { fields: { visaExpiry: "Enter a valid expiry date" } });
+  return d;
+}
+
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, ...d } = editSchema.parse(req.body);
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, ...d } = editSchema.parse(req.body);
+  const visaExpiryPatch = visaExpiryValue(visaExpiry);
   // This route carries no country field, so the number's own +dialcode decides it (else India).
   for (const field of ["phone", "familyPhone"] as const) {
     const raw = d[field];
@@ -322,6 +334,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     where: { id: pid(req.params.id) },
     data: {
       ...d,
+      ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
       ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
       ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
       ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
@@ -362,8 +375,9 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   } else if (body.dob) {
     dobIsApproximate = false;
   }
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, ...d } = fullEditSchema.parse(body);
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, ...d } = fullEditSchema.parse(body);
   void _age;
+  const visaExpiryPatch = visaExpiryValue(visaExpiry);
   // Normalise both numbers before they are written. Falls back to the member's residence country
   // when the form did not say which country the number was typed under.
   const residence = await prisma.member.findUniqueOrThrow({ where: { id }, select: { country: true } });
@@ -388,6 +402,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
       where: { id },
       data: {
         ...d,
+        ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
         ...(dob !== undefined && { dob: new Date(dob) }),
         ...(dobIsApproximate !== undefined && { dobIsApproximate }),
         ...(country && { country }),
@@ -558,7 +573,7 @@ adminRouter.get("/members/:id/document", wrap(async (req, res) => {
 const membershipSchema = z.object({
   plan:      z.enum(["DIKRI", "DIKRA", "SIGNATURE"]),
   startDate: z.string().datetime(),
-  endDate:   z.string().datetime(),
+  endDate:   z.string().datetime().optional(), // optional
   note:      z.string().trim().max(300).optional(),
 });
 
@@ -620,8 +635,8 @@ adminRouter.post("/members/:id/membership", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: memberId } });
   if (!m) throw new HttpError(404, "Member not found.");
   const start = new Date(d.startDate);
-  const end   = new Date(d.endDate);
-  if (end <= start) throw new HttpError(422, "End date must be after start date.");
+  const end   = d.endDate ? new Date(d.endDate) : null;
+  if (end && end <= start) throw new HttpError(422, "End date must be after start date.");
   const admin = await prisma.adminUser.findUnique({ where: { id: adminId(req) }, select: { name: true } });
   const row = await prisma.membershipPlan.create({
     data: { memberId, plan: d.plan, startDate: start, endDate: end, note: d.note, createdBy: admin?.name },

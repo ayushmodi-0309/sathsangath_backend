@@ -4,7 +4,7 @@ import { ageFrom } from "./util";
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
   photos: { orderBy: [{ isMain: "desc" as const }, { createdAt: "asc" as const }] },
-  membershipPlans: { where: { endDate: { gte: new Date() } }, orderBy: { startDate: "desc" as const }, take: 1 },
+  membershipPlans: { orderBy: { startDate: "desc" as const } }, // all plans: activePlan() picks the one running today (an open-ended plan has no end date)
 };
 
 /** Ids of members who have liked each other with `memberId` (mutual likes). */
