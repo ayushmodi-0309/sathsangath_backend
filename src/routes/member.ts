@@ -1,18 +1,19 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
 import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
-import { toContactProfile, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
+import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { activity, list, memberLabel } from "../lib/util";
-import { checkAnyPhone, type CountryCode } from "../lib/phone";
+import { checkAnyPhone, isCountry } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { photoUpload, weightKgField } from "./public";
+import { photoUpload, VISA_TYPES, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
+import { syncMainPhoto } from "../lib/photos";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
@@ -28,16 +29,6 @@ const STATUS_LABEL: Record<string, string> = {
 const me = (req: { actor?: { id: string } }) => req.actor!.id;
 const loadMe = (id: string) => prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
 const who = (m: { id: string; profileCode: string; fullName: string }) => ({ type: "MEMBER" as const, memberId: m.id, name: memberLabel(m) });
-
-/** Keeps Member.photoUrl equal to the chosen main photo (used for cards and lists). */
-async function syncMainPhoto(memberId: string) {
-  let main = await prisma.photo.findFirst({ where: { memberId, isMain: true } });
-  if (!main) {
-    main = await prisma.photo.findFirst({ where: { memberId }, orderBy: { createdAt: "asc" } });
-    if (main) await prisma.photo.update({ where: { id: main.id }, data: { isMain: true } });
-  }
-  await prisma.member.update({ where: { id: memberId }, data: { photoUrl: main?.url ?? null } });
-}
 
 // ---------- Account ----------
 memberRouter.get("/me", wrap(async (req, res) => { res.json(await toSelf(await loadMe(me(req)))); }));
@@ -76,13 +67,18 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     return undefined;
   }, z.array(z.string().trim()).optional());
 
+  // "" is an explicit clear. A missing key is left untouched.
+  const clearable = z.preprocess((v) => (v === "" ? null : v), z.string().trim().max(2000).nullable().optional());
   const d = z.object({
     gender: z.string().trim().toUpperCase().pipe(z.enum(["MALE", "FEMALE"])).optional(),
     dob: z.string().refine((s) => { const d = new Date(s); const age = (Date.now() - d.getTime()) / 31557600000; return !isNaN(d.getTime()) && age >= 18 && age <= 80; }, "Enter a valid date of birth (18 years or older)").optional(),
     heightCm: num, weightKg: weightKgField,
     maritalStatus: str, motherTongue: str, diet: str, createdBy: str,
     community: str, subCommunity: str,
-    city: str, state: str, nativePlace: str,
+    city: clearable, state: clearable, nativePlace: str,
+    // Where they live. Any non-empty text is kept, so a country we do not list still saves.
+    country: z.string().trim().min(1).max(100).optional(),
+    visaType: clearable, visaExpiry: clearable,
     education: str, profession: str, income: str, about: str,
     fatherName: str, fatherOccupation: str,
     motherName: str, motherOccupation: str,
@@ -92,20 +88,67 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     prefCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, ...rest } = d;
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, country, visaType, visaExpiry, ...rest } = d;
 
-  // Verify city against member's country
+  const member = await loadMe(me(req));
+  const nextCountry = (country ?? member.country ?? "IN").trim() || "IN";
+  const countryChanged = country !== undefined && nextCountry !== (member.country || "IN");
+
+  // A city belongs to a country. Changing country drops a city that was never
+  // re-picked; a city that was sent is checked against the country being saved.
   let resolvedCity = city, resolvedState = state;
-  if (city) {
-    const member = await loadMe(me(req));
-    const hit = verifyCity((member.country || "IN") as CountryCode, city, state);
-    if (!hit) throw new HttpError(422, `We could not find "${city}". Please pick a city from the suggestions.`, { fields: { city: `"${city}" was not found in our city list.` } });
-    resolvedCity = hit.name; resolvedState = hit.state || state;
+  const cityToCheck = city !== undefined ? city : (countryChanged ? member.city : undefined);
+  const stateToCheck = state !== undefined ? state : (countryChanged ? member.state ?? undefined : undefined);
+  if (cityToCheck) {
+    if (isCountry(nextCountry)) {
+      const hit = verifyCity(nextCountry, cityToCheck, stateToCheck ?? undefined);
+      if (!hit) {
+        if (city !== undefined) throw new HttpError(422, `We could not find "${cityToCheck}". Please pick a city from the suggestions.`, { fields: { city: `"${cityToCheck}" was not found in our city list.` } });
+        resolvedCity = null; resolvedState = null;
+      } else if (city !== undefined || countryChanged) {
+        resolvedCity = hit.name; resolvedState = hit.state || stateToCheck;
+      }
+    } else if (city !== undefined) {
+      resolvedCity = city;
+      if (state !== undefined) resolvedState = state;
+    } else if (countryChanged) {
+      resolvedCity = null; resolvedState = null;
+    }
+  } else if (city === null || (countryChanged && city === undefined)) {
+    resolvedCity = null;
+    if (state === undefined || state === null) resolvedState = null;
   }
 
   const data: Record<string, unknown> = { ...rest };
+  if (country !== undefined) data.country = nextCountry;
   if (resolvedCity !== undefined) data.city = resolvedCity;
   if (resolvedState !== undefined) data.state = resolvedState;
+
+  // Visa is part of living outside India. India clears it. Anywhere else, the
+  // status is required and only "Citizen" is allowed to have no expiry. The
+  // expiry stays on the member's own account — other members never receive it.
+  const touchingResidence = country !== undefined || visaType !== undefined || visaExpiry !== undefined;
+  if (touchingResidence) {
+    if (nextCountry === "IN") {
+      data.visaType = null;
+      data.visaExpiry = null;
+    } else {
+      const nextVisa = visaType !== undefined ? visaType : member.visaType;
+      if (!nextVisa || !(VISA_TYPES as readonly string[]).includes(nextVisa)) {
+        throw new HttpError(422, "Choose your visa or status.", { fields: { visaType: "Choose your visa or status" } });
+      }
+      data.visaType = nextVisa;
+      if (nextVisa === "Citizen") {
+        data.visaExpiry = null;
+      } else {
+        const raw = visaExpiry !== undefined ? visaExpiry : member.visaExpiry?.toISOString().slice(0, 10) ?? null;
+        const exp = raw ? new Date(raw) : null;
+        if (!exp || isNaN(exp.getTime())) throw new HttpError(422, "Tell us when your visa or status expires.", { fields: { visaExpiry: "Enter the date your visa or status expires" } });
+        if (exp.getTime() < Date.now()) throw new HttpError(422, "That visa expiry date has already passed.", { fields: { visaExpiry: "The expiry date must be in the future" } });
+        data.visaExpiry = exp;
+      }
+    }
+  }
   if (dob) data.dob = new Date(dob);
   if (prefCommunities !== undefined) data.prefCommunities = prefCommunities.join(",");
   if (prefCities !== undefined) data.prefCities = prefCities.join(",");
@@ -191,13 +234,15 @@ memberRouter.post("/photos", photoUpload.array("photo", MAX_PHOTOS), wrap(async 
   const have = await prisma.photo.count({ where: { memberId: me(req) } });
   if (have + files.length > MAX_PHOTOS) throw new HttpError(422, `You can keep up to ${MAX_PHOTOS} photos. Remove one to add another.`);
   const wantMain = String(req.body.mainIndex ?? "") !== "" ? Number(req.body.mainIndex) : -1;
-  const hasMain = !!(await prisma.photo.findFirst({ where: { memberId: me(req), isMain: true } }));
-  if (wantMain >= 0 && files[wantMain]) await prisma.photo.updateMany({ where: { memberId: me(req) }, data: { isMain: false } });
   const keys = await Promise.all(files.map((f) => saveUpload("photos", f)));
-  for (const [i, key] of keys.entries()) {
-    await prisma.photo.create({ data: { memberId: me(req), url: key, isMain: wantMain >= 0 ? i === wantMain : !hasMain && i === 0 } });
+  // Created one at a time so `createdAt` keeps the order they were picked in,
+  // which is the order the gallery shows them in. syncMainPhoto settles which
+  // one is main: the one asked for, else the existing main, else the oldest.
+  const added = [];
+  for (const key of keys) {
+    added.push(await prisma.photo.create({ data: { memberId: me(req), url: key, isMain: false } }));
   }
-  await syncMainPhoto(me(req));
+  await syncMainPhoto(me(req), wantMain >= 0 ? added[wantMain]?.id : undefined);
   const m = await loadMe(me(req));
   await activity(who(m), "UPLOADED_PHOTOS", "Photo", undefined, { count: files.length });
   res.status(201).json((await toSelf(m)).photos);
@@ -206,11 +251,7 @@ memberRouter.post("/photos", photoUpload.array("photo", MAX_PHOTOS), wrap(async 
 memberRouter.patch("/photos/:id/main", wrap(async (req, res) => {
   const p = await prisma.photo.findFirst({ where: { id: String(req.params.id), memberId: me(req) } });
   if (!p) throw new HttpError(404, "Photo not found.");
-  await prisma.$transaction([
-    prisma.photo.updateMany({ where: { memberId: me(req) }, data: { isMain: false } }),
-    prisma.photo.update({ where: { id: p.id }, data: { isMain: true } }),
-  ]);
-  await syncMainPhoto(me(req));
+  await syncMainPhoto(me(req), p.id);
   const m = await loadMe(me(req));
   await activity(who(m), "CHANGED_MAIN_PHOTO", "Photo", p.id);
   res.json((await toSelf(m)).photos);
@@ -228,7 +269,10 @@ memberRouter.delete("/photos/:id", wrap(async (req, res) => {
 }));
 
 // ---------- Matches & profiles ----------
-memberRouter.get("/matches", wrap(async (req, res) => {
+// Everything below needs an approved profile: a member waiting for review (or
+// for a correction) has no access to anyone else's bio data, only to their own
+// account. Liking and introductions were already gated; browsing was not.
+memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
   const csv = z.string().optional().transform((v) => { const l = list(v); return l.length ? l : undefined; });
   const num = z.coerce.number().int().min(0).optional();
   const q = z.object({
@@ -259,7 +303,7 @@ memberRouter.get("/matches", wrap(async (req, res) => {
   });
 }));
 
-memberRouter.get("/matches/filter-options", wrap(async (req, res) => {
+memberRouter.get("/matches/filter-options", requireApproved, wrap(async (req, res) => {
   res.json(await filterOptionsFor(me(req)));
 }));
 
@@ -272,7 +316,16 @@ async function loadVisible(viewerId: string, profileId: string) {
   return { p, isMutual };
 }
 
-memberRouter.get("/profiles/:id", wrap(async (req, res) => {
+/**
+ * Own-profile preview stays open while the bio data waits on our team: it is
+ * the member's own data, and seeing how it will read to others is exactly what
+ * they are meant to be doing in the meantime. Anyone else's profile needs an
+ * approved account.
+ */
+const approvedUnlessSelf: RequestHandler = (req, res, next) =>
+  String(req.params.id) === me(req) ? next() : requireApproved(req, res, next);
+
+memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   const viewerId = me(req);
   const profileId = String(req.params.id);
   /** Own profile preview: full detail like a mutual view, but not a mutual *match*. */
@@ -293,11 +346,12 @@ memberRouter.get("/profiles/:id", wrap(async (req, res) => {
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: p.id, targetId: me(req) } } }),
     prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: me(req), profileId: p.id } } }),
   ]);
-  // Viewer sees contact details when either party's intro request was facilitated
   const activeIntro = introByMe ?? introByThem;
-  const contactVisible = activeIntro?.status === "INTRODUCTION_FACILITATED";
+  // A facilitated introduction unlocks nothing here: our team passes the
+  // numbers between the families. No member-facing shape carries a phone or
+  // an email, so there is no branch for it.
   const revealFull = isMutual || isSelf;
-  const serialized = contactVisible ? await toContactProfile(p) : revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
+  const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
   res.json({
     ...serialized,
     liked: isSelf ? false : !!like,
@@ -305,7 +359,6 @@ memberRouter.get("/profiles/:id", wrap(async (req, res) => {
     suggested: isSelf ? false : !!sug,
     suggestionNote: isSelf ? null : sug?.note ?? null,
     introduction: isSelf ? null : activeIntro ? { status: activeIntro.status, label: STATUS_LABEL[activeIntro.status] } : null,
-    contactVisible: isSelf ? false : contactVisible,
   });
 }));
 
@@ -371,7 +424,7 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   res.json({ liked: false });
 }));
 
-memberRouter.get("/likes/received", wrap(async (req, res) => {
+memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
   const [likes, mutual] = await Promise.all([
     prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, include: { liker: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
@@ -382,7 +435,7 @@ memberRouter.get("/likes/received", wrap(async (req, res) => {
   })));
 }));
 
-memberRouter.get("/likes", wrap(async (req, res) => {
+memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
   const [likes, mutual, intros, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, include: { liked: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
@@ -397,7 +450,7 @@ memberRouter.get("/likes", wrap(async (req, res) => {
 }));
 
 /** "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first). */
-memberRouter.get("/suggestions", wrap(async (req, res) => {
+memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const [rows, likes, mutual, intros] = await Promise.all([
     prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, include: { profile: { include: includeTags } } }),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
