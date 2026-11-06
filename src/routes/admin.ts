@@ -394,9 +394,13 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   const big = newPhotos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
   if (big) throw new HttpError(422, "Photos must be JPG, PNG or WebP and 5 MB or smaller.", { fields: { photos: "Photos must be JPG, PNG or WebP and 5 MB or smaller" } });
   const uploadedPhotoUrls: string[] = [];
-  let biodataFileUrl: string | undefined, idProofUrl: string | undefined;
+  let biodataFileUrl: string | undefined, idProofUrl: string | undefined, newMainUrl: string | undefined;
   try {
     for (const p of newPhotos) uploadedPhotoUrls.push(await saveUpload("photos", p));
+    // The new photo chosen as main (mainPhotoIndex), else the first one only when the member has no main photo yet.
+    const idx = Number.parseInt(String(req.body.mainPhotoIndex ?? ""), 10);
+    const hasMain = (await prisma.photo.count({ where: { memberId: pid(req.params.id), isMain: true } })) > 0;
+    newMainUrl = uploadedPhotoUrls[Number.isInteger(idx) && idx >= 0 && idx < uploadedPhotoUrls.length ? idx : hasMain ? -1 : 0];
     if (f?.biodata?.[0]) biodataFileUrl = await saveUpload("docs", f.biodata[0]);
     if (f?.idproof?.[0]) idProofUrl = await saveUpload("docs", f.idproof[0]);
     const m = await prisma.member.update({
@@ -414,13 +418,8 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
         ...(prefCountries !== undefined && { prefCountries: prefCountries.join(",") }),
         ...(biodataFileUrl && { biodataFileUrl }),
         ...(idProofUrl && { idProofUrl }),
-        // Added photos are never main on arrival: marking the first of each
-        // batch main left a member with one main photo per upload, and every
-        // one of them wore the "Main photo" badge in the app and on the web.
-        // syncMainPhoto below keeps the main photo they already had — or
-        // promotes the oldest when this is their first photo — and points
-        // Member.photoUrl at it.
-        ...(uploadedPhotoUrls.length && { photos: { create: uploadedPhotoUrls.map((url) => ({ url, isMain: false })) } }),
+        ...(newMainUrl && { photoUrl: newMainUrl }),
+        ...(uploadedPhotoUrls.length && { photos: { ...(newMainUrl && { updateMany: { where: { isMain: true }, data: { isMain: false } } }), create: uploadedPhotoUrls.map((url) => ({ url, isMain: url === newMainUrl })) } }),
       },
       include: includeTags,
     });
@@ -547,6 +546,34 @@ adminRouter.post("/members/:id/reset-password", wrap(async (req, res) => {
   await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
   await audit(adminId(req), "RESET_PASSWORD", "Member", id);
   res.json({ ok: true, password: pw });
+}));
+async function syncMainPhoto(memberId: string) {
+  let main = await prisma.photo.findFirst({ where: { memberId, isMain: true } });
+  if (!main) {
+    main = await prisma.photo.findFirst({ where: { memberId }, orderBy: { createdAt: "asc" } });
+    if (main) await prisma.photo.update({ where: { id: main.id }, data: { isMain: true } });
+  }
+  await prisma.member.update({ where: { id: memberId }, data: { photoUrl: main?.url ?? null } });
+}
+adminRouter.delete("/members/:id/photos/:photoId", wrap(async (req, res) => {
+  const p = await prisma.photo.findFirst({ where: { id: String(req.params.photoId), memberId: pid(req.params.id) } });
+  if (!p) throw new HttpError(404, "Photo not found.");
+  await prisma.photo.delete({ where: { id: p.id } });
+  await removeObject(p.url);
+  await syncMainPhoto(p.memberId);
+  await audit(adminId(req), "DELETE_PHOTO", "Member", p.memberId, { photoId: p.id });
+  res.json({ ok: true });
+}));
+adminRouter.patch("/members/:id/photos/:photoId/main", wrap(async (req, res) => {
+  const p = await prisma.photo.findFirst({ where: { id: String(req.params.photoId), memberId: pid(req.params.id) } });
+  if (!p) throw new HttpError(404, "Photo not found.");
+  await prisma.$transaction([
+    prisma.photo.updateMany({ where: { memberId: p.memberId }, data: { isMain: false } }),
+    prisma.photo.update({ where: { id: p.id }, data: { isMain: true } }),
+  ]);
+  await syncMainPhoto(p.memberId);
+  await audit(adminId(req), "CHANGE_MAIN_PHOTO", "Member", p.memberId, { photoId: p.id });
+  res.json({ ok: true });
 }));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
   const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });

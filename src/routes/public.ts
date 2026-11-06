@@ -39,7 +39,7 @@ const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v =
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
 
 /** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
-export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "Work visa", "Student visa", "Dependent / spouse visa", "Business visa", "Visitor visa", "Other"] as const;
+export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "H-1B visa", "Work visa (other)", "Student visa", "Dependent / spouse visa (H-4 etc.)", "Business visa", "Visitor visa", "Other"] as const;
 const NO_EXPIRY_VISA = "Citizen";
 /**
  * The fixed choices the web forms offer as dropdowns (frontend/lib/geo.ts and the form files).

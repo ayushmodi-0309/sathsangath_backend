@@ -30,7 +30,7 @@ export async function nextProfileCode() {
 export const normPhone = (p: string) => p.replace(/[^\d+]/g, "").replace(/^(\+?91)(?=\d{10}$)/, "");
 /** Records anything a member or visitor does, so the admin Activity log shows everything. Never throws. */
 export const activity = (who: { type: "MEMBER" | "PUBLIC"; memberId?: string; name?: string }, action: string, entity: string, entityId?: string, detail?: unknown) =>
-  prisma.auditLog.create({ data: { actorType: who.type, memberId: who.memberId, actorName: who.name, action, entity, entityId, detail: detail ? JSON.stringify(detail) : undefined } }).catch(() => {});
+  prisma.auditLog.create({ data: { actorType: who.type, memberId: who.memberId, actorName: who.name, action, entity, entityId, detail: detail ? JSON.stringify(detail) : undefined } }).catch((e) => { console.error("activity log failed:", e?.message ?? e); });
 export const memberLabel = (m: { profileCode: string; fullName: string }) => `${m.fullName} (${m.profileCode})`;
 export const audit = (adminId: string | undefined, action: string, entity: string, entityId?: string, detail?: unknown) =>
   prisma.auditLog.create({ data: { adminId, action, entity, entityId, detail: detail ? JSON.stringify(detail) : undefined } });
