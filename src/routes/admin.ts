@@ -547,34 +547,6 @@ adminRouter.post("/members/:id/reset-password", wrap(async (req, res) => {
   await audit(adminId(req), "RESET_PASSWORD", "Member", id);
   res.json({ ok: true, password: pw });
 }));
-async function syncMainPhoto(memberId: string) {
-  let main = await prisma.photo.findFirst({ where: { memberId, isMain: true } });
-  if (!main) {
-    main = await prisma.photo.findFirst({ where: { memberId }, orderBy: { createdAt: "asc" } });
-    if (main) await prisma.photo.update({ where: { id: main.id }, data: { isMain: true } });
-  }
-  await prisma.member.update({ where: { id: memberId }, data: { photoUrl: main?.url ?? null } });
-}
-adminRouter.delete("/members/:id/photos/:photoId", wrap(async (req, res) => {
-  const p = await prisma.photo.findFirst({ where: { id: String(req.params.photoId), memberId: pid(req.params.id) } });
-  if (!p) throw new HttpError(404, "Photo not found.");
-  await prisma.photo.delete({ where: { id: p.id } });
-  await removeObject(p.url);
-  await syncMainPhoto(p.memberId);
-  await audit(adminId(req), "DELETE_PHOTO", "Member", p.memberId, { photoId: p.id });
-  res.json({ ok: true });
-}));
-adminRouter.patch("/members/:id/photos/:photoId/main", wrap(async (req, res) => {
-  const p = await prisma.photo.findFirst({ where: { id: String(req.params.photoId), memberId: pid(req.params.id) } });
-  if (!p) throw new HttpError(404, "Photo not found.");
-  await prisma.$transaction([
-    prisma.photo.updateMany({ where: { memberId: p.memberId }, data: { isMain: false } }),
-    prisma.photo.update({ where: { id: p.id }, data: { isMain: true } }),
-  ]);
-  await syncMainPhoto(p.memberId);
-  await audit(adminId(req), "CHANGE_MAIN_PHOTO", "Member", p.memberId, { photoId: p.id });
-  res.json({ ok: true });
-}));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
   const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });
   await prisma.member.delete({ where: { id: pid(req.params.id) } });
