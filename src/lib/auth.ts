@@ -43,10 +43,22 @@ export const requireMember = async (req: Request, _res: Response, next: NextFunc
   } catch (e) { next(e); }
 };
 
-/** Use after requireMember on actions (liking, introductions) that need an approved profile. */
+/**
+ * Everything another member is part of: seeing profiles, liking, asking for an
+ * introduction. Until our team has approved the bio data a member only has
+ * their own account — they can edit their profile, add photos and read their
+ * updates, and nothing else. Their profile is equally invisible to others,
+ * which `matchesFor` already handles by only ever listing APPROVED members.
+ *
+ * Use after requireMember, which has put the member's status on `actor.role`.
+ */
 export const requireApproved = (req: Request, _res: Response, next: NextFunction) => {
-  if (req.actor?.role !== "APPROVED") return next(new HttpError(403, "This unlocks once Sathsangath approves your bio data."));
-  next();
+  const status = req.actor?.role;
+  if (status === "APPROVED") return next();
+  const message = status === "CORRECTION"
+    ? "Our team has asked for a correction to your bio data. Profiles unlock once you update it and we approve it."
+    : "Your bio data is still under review. Profiles unlock once Sathsangath approves it, usually within 2–3 working days.";
+  next(new HttpError(403, message, undefined, "NOT_APPROVED"));
 };
 
 /** Signed-in Firebase user, with or without a Member row yet. Resolves req.accountId. */

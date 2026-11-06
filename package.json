@@ -15,7 +15,8 @@
     "db:seed:50": "tsx prisma/seed-50-users.ts",
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts",
     "mail:check": "tsx scripts/mail-check.ts",
-    "tags:backfill": "tsx scripts/backfill-tags.ts"
+    "tags:backfill": "tsx scripts/backfill-tags.ts",
+    "photos:fix-main": "tsx scripts/fix-main-photos.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1146.0",

@@ -11,12 +11,26 @@ function activePlan(plans: MembershipPlan[]): MembershipPlan | null {
 
 type FullMember = Member & { tags?: (MemberTag & { tagValue: TagValue & { category: TagCategory } })[]; photos?: Photo[]; membershipPlans?: MembershipPlan[] };
 const mainOnly = (ps: Photo[]) => { const main = ps.find((p) => p.isMain) ?? ps[0]; return main ? [main] : []; };
-const toPhotos = (m: FullMember) => Promise.all((m.photos ?? []).map(async (p) => ({ id: p.id, url: (await resolveUrl(p.url))!, isMain: p.isMain })));
+/**
+ * Exactly one photo goes out as the main one, whatever the rows say.
+ * syncMainPhoto keeps the database to that rule, but a member left with
+ * several mains by an older write would otherwise wear a "Main photo" badge on
+ * each of their photos in the app and on the web, so the shape settles it too:
+ * the first main photo, or the first photo when none is marked. Queries order
+ * photos by isMain and then oldest first, so that is the longest-standing one.
+ */
+const toPhotos = (m: FullMember) => {
+  const ps = m.photos ?? [];
+  const mainId = (ps.find((p) => p.isMain) ?? ps[0])?.id;
+  return Promise.all(ps.map(async (p) => ({ id: p.id, url: (await resolveUrl(p.url))!, isMain: p.id === mainId })));
+};
 
 /**
  * PRIVACY: this is the ONLY shape another member ever receives.
  * Name, phone, email, family contacts, DOB and the original document are never included —
- * masking happens here on the server, not with CSS.
+ * masking happens here on the server, not with CSS. Nothing unlocks a contact
+ * detail for another member: not a mutual like, not a facilitated
+ * introduction. Only the member themselves and the admin see those.
  *
  * birthTime and birthPlace are horoscope data and are admin-only: they appear in
  * toAdminMember and in no member-facing shape, not even toSelf. Do not add them here.
@@ -46,7 +60,13 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
     motherTongue: m.motherTongue,
     familyType: m.familyType,
     nativePlace: m.nativePlace, // public: members can filter by it
-    visaType: m.visaType, // only the kind of visa or status; the expiry date and the document stay private
+    // Where they live and, if that is outside India, the kind of visa or
+    // status they hold. Both are public: it is the first thing a family asks
+    // and they already filter on country, so withholding it until a mutual
+    // like only made people ask us instead. The expiry date and the document
+    // itself stay private.
+    country: m.country,
+    visaType: m.visaType,
     // Other members see only the main photo until both have liked each other.
     photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos ?? []) }),
   };
@@ -54,14 +74,14 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
 
 /**
  * After BOTH members have liked each other the other side also sees the full name,
- * date of birth, religion, country, parents' names and income.
+ * date of birth, religion, parents' names and income. (Country is public —
+ * see toPublicProfile.)
  * Phone, email and family contacts still stay private: only the admin shares those.
  */
 export const toMutualProfile = async (m: FullMember) => ({
   ...(await toPublicProfile(m, true)), fullName: m.fullName, mutual: true,
   dob: m.dob, dobIsApproximate: m.dobIsApproximate,
   religion: m.religion,
-  country: m.country,
   fatherName: m.fatherName,
   motherName: m.motherName,
   income: m.income, // revealed only after a mutual like, and deliberately not filterable
@@ -73,12 +93,15 @@ export const toMutualProfile = async (m: FullMember) => ({
   },
 });
 
-/** After introduction is facilitated by admin: contact details are also revealed. */
-export const toContactProfile = async (m: FullMember) => ({
-  ...(await toMutualProfile(m)),
-  phone: m.phone, email: m.email, familyPhone: m.familyPhone, familyEmail: m.familyEmail,
-  contactVisible: true,
-});
+/*
+ * There is deliberately no member-facing shape that carries contact details.
+ *
+ * An arranged introduction does NOT reveal a phone number or an email address:
+ * our team passes those between the families themselves. Only the member
+ * (toSelf) and the admin (toAdminMember) ever see them. This used to be a
+ * toContactProfile() that unlocked after an introduction was facilitated —
+ * if you are looking for it, that was the bug, and it is gone.
+ */
 
 /** A member's own account: includes their own contact details, never admin notes. */
 export async function toSelf(m: FullMember) {

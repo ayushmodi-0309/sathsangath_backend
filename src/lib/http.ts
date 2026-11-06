@@ -3,7 +3,12 @@ import { ZodError } from "zod";
 import { MulterError } from "multer";
 
 export class HttpError extends Error {
-  constructor(public status: number, message: string, public details?: unknown) { super(message); }
+  /**
+   * `code` is for the clients, not for people: the app and the member panel
+   * switch on it to draw the right screen, so the wording of `message` can
+   * change without breaking them.
+   */
+  constructor(public status: number, message: string, public details?: unknown, public code?: string) { super(message); }
 }
 export const wrap = (fn: (req: Request, res: Response) => Promise<unknown>): RequestHandler =>
   (req, res, next) => { fn(req, res).catch(next); };
@@ -34,7 +39,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
       : err.code === "LIMIT_UNEXPECTED_FILE" || err.code === "LIMIT_FILE_COUNT" ? "Too many files were attached." : "The upload could not be processed.";
     return res.status(413).json({ error: msg, fields: err.code === "LIMIT_FILE_SIZE" ? { photos: msg } : {} });
   }
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, details: err.details });
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, details: err.details, code: err.code });
   console.error(err);
   res.status(500).json({ error: "Something went wrong. Please try again." });
 }

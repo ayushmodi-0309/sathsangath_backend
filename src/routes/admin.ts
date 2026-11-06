@@ -15,6 +15,7 @@ import { config } from "../lib/config";
 import multer from "multer";
 import { createSubmission, DIETS, FAMILY_TYPES, INCOME_RANGES, intakeSchema, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, RELOCATE } from "./public";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
+import { syncMainPhoto } from "../lib/photos";
 import { checkAnyPhone, checkPhone, isCountry, type CountryCode } from "../lib/phone";
 
 export const adminRouter = Router();
@@ -413,17 +414,61 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
         ...(prefCountries !== undefined && { prefCountries: prefCountries.join(",") }),
         ...(biodataFileUrl && { biodataFileUrl }),
         ...(idProofUrl && { idProofUrl }),
-        ...(uploadedPhotoUrls.length && { photoUrl: uploadedPhotoUrls[0] }),
-        ...(uploadedPhotoUrls.length && { photos: { create: uploadedPhotoUrls.map((url, i) => ({ url, isMain: i === 0 })) } }),
+        // Added photos are never main on arrival: marking the first of each
+        // batch main left a member with one main photo per upload, and every
+        // one of them wore the "Main photo" badge in the app and on the web.
+        // syncMainPhoto below keeps the main photo they already had — or
+        // promotes the oldest when this is their first photo — and points
+        // Member.photoUrl at it.
+        ...(uploadedPhotoUrls.length && { photos: { create: uploadedPhotoUrls.map((url) => ({ url, isMain: false })) } }),
       },
       include: includeTags,
     });
+    if (uploadedPhotoUrls.length) await syncMainPhoto(m.id);
     await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
-    res.json(await toAdminMember(m));
+    res.json(await toAdminMember(uploadedPhotoUrls.length ? await prisma.member.findUniqueOrThrow({ where: { id: m.id }, include: includeTags }) : m));
   } catch (e) {
     await Promise.all([...uploadedPhotoUrls.map((u) => removeObject(u)), removeObject(biodataFileUrl), removeObject(idProofUrl)]);
     throw e;
   }
+}));
+
+// ---------- Photos ----------
+// Our team manages a member's photos alongside their bio data: a family often
+// sends them over WhatsApp, and the member may never open the app. Adding is
+// part of PUT /members/:id; these two are the rest of the job. A member can do
+// the same from their own account, and syncMainPhoto keeps both honest: one
+// main photo, with Member.photoUrl pointing at it.
+
+/** The photo, checked to belong to that member — so one member's id cannot reach another's photo. */
+async function photoOf(memberId: string, photoId: string) {
+  const p = await prisma.photo.findFirst({ where: { id: photoId, memberId } });
+  if (!p) throw new HttpError(404, "Photo not found.");
+  return p;
+}
+
+adminRouter.patch("/members/:id/photos/:photoId/main", wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  const p = await photoOf(id, pid(req.params.photoId));
+  await syncMainPhoto(id, p.id);
+  // Against the member, not the photo: GET /members/:id/history looks for
+  // admin rows by entity "Member", so anything else is invisible there.
+  await audit(adminId(req), "CHANGED_MAIN_PHOTO", "Member", id, { photo: p.id });
+  const m = await prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
+  res.json(await toAdminMember(m));
+}));
+
+adminRouter.delete("/members/:id/photos/:photoId", wrap(async (req, res) => {
+  const id = pid(req.params.id);
+  const p = await photoOf(id, pid(req.params.photoId));
+  await prisma.photo.delete({ where: { id: p.id } });
+  // The row is gone either way: an object left behind in storage is tidier to
+  // chase than a photo the member can still be shown but no longer delete.
+  await removeObject(p.url);
+  await syncMainPhoto(id);
+  await audit(adminId(req), "DELETED_PHOTO", "Member", id, { photo: p.id });
+  const m = await prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
+  res.json(await toAdminMember(m));
 }));
 
 // ---------- Review workflow ----------
