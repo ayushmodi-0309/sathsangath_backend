@@ -511,10 +511,16 @@ adminRouter.post("/members/:id/reject", wrap(async (req, res) => {
   res.json({ ok: true, delivery });
 }));
 
+// Allowed from any status, not just APPROVED: a profile still under review (or already rejected)
+// can equally need locking out. What it was before is remembered by approvedAt, which /reactivate reads.
 adminRouter.post("/members/:id/suspend", wrap(async (req, res) => {
   const { note } = z.object({ note: z.string().trim().optional() }).parse(req.body ?? {});
-  await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "SUSPENDED", adminNote: note } });
-  await audit(adminId(req), "SUSPEND", "Member", pid(req.params.id), { note });
+  const id = pid(req.params.id);
+  const cur = await prisma.member.findUnique({ where: { id }, select: { status: true } });
+  if (!cur) throw new HttpError(404, "Member not found.");
+  if (cur.status === "SUSPENDED") throw new HttpError(409, "This profile is already suspended.");
+  await prisma.member.update({ where: { id }, data: { status: "SUSPENDED", adminNote: note } });
+  await audit(adminId(req), "SUSPEND", "Member", id, { note, from: cur.status });
   res.json({ ok: true });
 }));
 // Undo an approval made by mistake: back to PENDING (hidden from matching, re-reviewable). Unlike suspend, the member is not locked out as an account.
@@ -528,10 +534,19 @@ adminRouter.post("/members/:id/restrict", wrap(async (req, res) => {
   await audit(adminId(req), "RESTRICT", "Member", id, { note });
   res.json({ ok: true });
 }));
+// Lifting a suspension puts the profile back where it was, which is not always APPROVED: a
+// profile can be suspended while it is still waiting for review, and reactivating it must not
+// approve it by the back door. approvedAt is the record of whether it ever passed review
+// (/restrict clears it), so a profile that never did goes back to PENDING for a real review.
 adminRouter.post("/members/:id/reactivate", wrap(async (req, res) => {
-  await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "APPROVED", adminNote: null } });
-  await audit(adminId(req), "REACTIVATE", "Member", pid(req.params.id));
-  res.json({ ok: true });
+  const id = pid(req.params.id);
+  const cur = await prisma.member.findUnique({ where: { id }, select: { status: true, approvedAt: true } });
+  if (!cur) throw new HttpError(404, "Member not found.");
+  if (cur.status !== "SUSPENDED") throw new HttpError(409, "Only a suspended profile can be reactivated.");
+  const status = cur.approvedAt ? "APPROVED" : "PENDING";
+  await prisma.member.update({ where: { id }, data: { status, adminNote: null } });
+  await audit(adminId(req), "REACTIVATE", "Member", id, { status });
+  res.json({ ok: true, status });
 }));
 adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
   const delivery = await issueCredentials(pid(req.params.id));
