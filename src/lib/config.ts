@@ -9,7 +9,7 @@ export const config = {
     .filter(Boolean),
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID ?? "sathsangath-9014",
   webhookSecret: process.env.INTAKE_WEBHOOK_SECRET ?? "",
-  webLoginUrl: process.env.WEB_LOGIN_URL ?? "https://sathsangath-frontend.vercel.app/login",
+  webLoginUrl: process.env.WEB_LOGIN_URL ?? "https://www.sathsangath.in/login",
   /** Where a "forgot password" link points. Derived from the login URL unless set explicitly. */
   webResetUrl: process.env.WEB_RESET_URL
     ?? (process.env.WEB_LOGIN_URL ?? "https://sathsangath-frontend.vercel.app/login").replace(/\/login\/?$/, "/reset-password"),
@@ -36,6 +36,7 @@ export const config = {
     supportEmail: process.env.SUPPORT_EMAIL ?? "support@sathsangath.in",
     supportPhone: process.env.SUPPORT_PHONE ?? "+91 70160 40925",
     whatsapp: process.env.SUPPORT_WHATSAPP ?? "https://wa.me/917016040925",
+    playStore: "https://play.google.com/store/apps/details?id=com.sathsangath.app&hl=en_IN",
   },
   storage: {
     provider: "r2", // "r2" | "s3" - change here when moving to AWS S3 (GCS needs a new driver)
