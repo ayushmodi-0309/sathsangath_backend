@@ -113,6 +113,8 @@ export async function toSelf(m: FullMember) {
     religion: m.religion, country: m.country,
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
     dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
+    // Members who signed up with Google have no password yet; the settings screen offers to create one.
+    hasPassword: !!m.passwordHash,
     visaType: m.visaType, visaExpiry: m.visaExpiry,
     // What our team asked the member to change. adminNote is also used to record
     // why an account was suspended or restricted, which is internal, so it is

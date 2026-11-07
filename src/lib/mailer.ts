@@ -2,7 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import { config } from "./config";
 import { LOGO_PNG_BASE64 } from "../assets/email/logo-data";
 
-export type Delivery = "sent" | "skipped" | "failed";
+export type Delivery = "sent" | "failed" | "no-address" | "not-configured";
 export const LOGO_CID = "sathsangath-logo";
 
 let transporter: Transporter | undefined;
@@ -24,11 +24,12 @@ export async function verifyMail() { await getTransporter().verify(); }
 
 /**
  * Sends one HTML email with the brand logo embedded (cid image, so it shows even when the client blocks remote images).
- * Never throws: callers get "sent", "skipped" (not configured / no address) or "failed" (logged).
+ * Never throws: callers get "sent", "no-address" (nothing on file), "not-configured" (no SMTP credentials)
+ * or "failed" (logged). The reason is reported as-is so the admin screen can say why nothing went out.
  */
 export async function sendMail(opts: { to: string | null | undefined; subject: string; html: string; text: string }): Promise<Delivery> {
-  if (!opts.to) return "skipped";
-  if (!mailConfigured()) { console.log(`[EMAIL not configured -> ${opts.to}] ${opts.subject}`); return "skipped"; }
+  if (!opts.to) return "no-address";
+  if (!mailConfigured()) { console.log(`[EMAIL not configured -> ${opts.to}] ${opts.subject}`); return "not-configured"; }
   try {
     await getTransporter().sendMail({
       from: { name: config.mail.fromName, address: config.mail.user },

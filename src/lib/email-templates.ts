@@ -107,6 +107,17 @@ export function credentialsEmail(m: M, password: string): Email {
   });
 }
 
+/** Self-serve password reset: a one-time link, valid for a short while. */
+export function resetPasswordEmail(m: M, url: string, minutes: number): Email {
+  return layout({
+    subject: "Reset your Sathsangath password", preheader: "A link to choose a new password for your Sathsangath login.",
+    title: "Reset your password", greeting: `Namaste ${firstName(m.fullName)},`, textLines: [],
+    paragraphs: [`We received a request to reset the password for your Sathsangath login (Member ID ${esc(m.profileCode)}). Choose a new password with the button below. The link works once and expires in ${minutes} minutes.`],
+    cta: { label: "Choose a new password", url },
+    note: "If you did not ask for this, you can ignore this email - your current password still works. Our team will never ask you for your password.",
+  });
+}
+
 export function approvedEmail(m: M): Email {
   return layout({
     subject: "Your Sathsangath bio data is approved", preheader: "You can now like profiles and request introductions.",
@@ -178,5 +189,6 @@ export const sms = {
   approved: (m: M) => `Sathsangath: your bio data is approved (ID ${m.profileCode}). Log in with your email at ${config.webLoginUrl} to like profiles.`,
   received: (m: M) => `Sathsangath: we have received your bio data (ref ${m.profileCode}). Our team will review it in 2-3 working days.`,
   suggestion: (other: { profileCode: string }) => `Sathsangath: our team has suggested a profile for you (${other.profileCode}). Log in to view it: ${config.webLoginUrl}`,
+  reset: (url: string, minutes: number) => `Sathsangath: reset your password with this link (valid ${minutes} minutes): ${url} - if you did not ask for it, ignore this message.`,
   mutual: (other: { profileCode: string }) => `Sathsangath: it's a match! ${other.profileCode} liked your profile too. Log in to view their profile: ${config.webLoginUrl}`,
 };

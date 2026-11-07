@@ -15,13 +15,13 @@ export const smsConfigured = () =>
 /**
  * Sends one SMS. Provider "twilio" sends for real once the TWILIO_* values are set; otherwise (console mode)
  * the message is only printed in the server log so development works without an account.
- * Never throws: returns "sent", "skipped" or "failed".
+ * Never throws: returns "sent", "not-configured" (console mode) or "failed".
  */
 export async function sendSms(phone: string, text: string): Promise<Delivery> {
   const to = toE164(phone);
   if (!smsConfigured()) {
     console.log(`[SMS console mode -> ${to}] ${text}`);
-    return "skipped";
+    return "not-configured";
   }
   try {
     const body = new URLSearchParams({ To: to, Body: text });
