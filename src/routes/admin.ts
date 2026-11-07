@@ -5,9 +5,9 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/db";
 import { sendPush } from "../lib/fcm";
 import { HttpError, paging, wrap } from "../lib/http";
-import { requireAdmin } from "../lib/auth";
+import { isOwner, normaliseRole, OWNER_ROLE, requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
-import { toAdminMember } from "../lib/serializers";
+import { adminListSelect, toAdminListItem, toAdminMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { audit, tempPassword } from "../lib/util";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
@@ -146,9 +146,9 @@ adminRouter.get("/members", wrap(async (req, res) => {
   const where = buildWhere(q);
   const [total, rows] = await Promise.all([
     prisma.member.count({ where }),
-    prisma.member.findMany({ where, include: includeTags, orderBy: { [q.sort]: q.order } as Record<string, "asc"|"desc">, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
+    prisma.member.findMany({ where, select: adminListSelect, orderBy: { [q.sort]: q.order } as Record<string, "asc"|"desc">, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
   ]);
-  res.json({ total, page: q.page, pageSize: q.pageSize, sort: q.sort, order: q.order, items: await Promise.all(rows.map(toAdminMember)) });
+  res.json({ total, page: q.page, pageSize: q.pageSize, sort: q.sort, order: q.order, items: rows.map(toAdminListItem) });
 }));
 
 adminRouter.get("/members/export.csv", wrap(async (req, res) => {
@@ -182,7 +182,26 @@ adminRouter.get("/members/:id", wrap(async (req, res) => {
     prisma.like.findMany({ where: { likerId: { in: sugProfileIds }, likedId: m.id }, select: { likerId: true } }).then((r) => new Set(r.map((x) => x.likerId))),
   ]) : [new Set<string>(), new Set<string>()];
   const suggestionsWithFlags = suggestions.map((s) => ({ ...s, viewerLiked: viewerLikedSet.has(s.profileId), profileLiked: profileLikedSet.has(s.profileId) }));
-  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceivedList, likesReceived: likesReceivedList.length, intros, introsReceived, overrides, suggestions: suggestionsWithFlags });
+  // Snapshot photoUrl values come straight out of the database as storage object
+  // keys ("photos/<id>/<hash>.jpg"); the browser cannot load those, so every
+  // snapshot that goes out is signed first, the same way toAdminMember signs the
+  // member's own photo. One cache signs a repeated profile only once.
+  const signed = new Map<string, Promise<string | null>>();
+  const snap = async <T extends { photoUrl: string | null }>(p: T | null | undefined) => {
+    if (!p) return p;
+    if (!p.photoUrl) return p;
+    let u = signed.get(p.photoUrl);
+    if (!u) { u = resolveUrl(p.photoUrl); signed.set(p.photoUrl, u); }
+    return { ...p, photoUrl: await u };
+  };
+  const [gaveTo, gotFrom, introsOut, introsIn, sugOut] = await Promise.all([
+    Promise.all(likesGiven.map(async (l) => ({ ...l, liked: await snap(l.liked) }))),
+    Promise.all(likesReceivedList.map(async (l) => ({ ...l, liker: await snap(l.liker) }))),
+    Promise.all(intros.map(async (i) => ({ ...i, target: await snap(i.target) }))),
+    Promise.all(introsReceived.map(async (i) => ({ ...i, requester: await snap(i.requester) }))),
+    Promise.all(suggestionsWithFlags.map(async (s) => ({ ...s, profile: (await snap(s.profile))! }))),
+  ]);
+  res.json({ ...(await toAdminMember(m)), likesGiven: gaveTo, likesReceivedList: gotFrom, likesReceived: gotFrom.length, intros: introsOut, introsReceived: introsIn, overrides, suggestions: sugOut });
 }));
 
 // Manual entry by admin (walk-in / phone enquiry): same fields and file rules as the public form, lands as PENDING.
@@ -570,16 +589,18 @@ adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (re
   res.json({ ok: true });
 }));
 
-// ID proof (Aadhaar / green card / visa / passport): sensitive, so only SUPER_ADMIN and ADMIN can open it, and every view is logged.
-adminRouter.get("/members/:id/id-proof", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+// ID proof (Aadhaar / green card / visa / passport): sensitive, so every view is
+// logged as VIEW_ID_PROOF against the staff login that opened it. Not role-gated -
+// the team all work the same queue - and the activity log is what makes that safe.
+adminRouter.get("/members/:id/id-proof", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
   if (!m?.idProofUrl) throw new HttpError(404, "No ID proof uploaded.");
   await audit(adminId(req), "VIEW_ID_PROOF", "Member", m.id, { type: m.idProofType });
   res.json({ url: await resolveUrl(m.idProofUrl, 300), type: m.idProofType });
 }));
 
-// ---------- "Suggested by Sathsangath" (super admin / admin hand-picks a bride or groom for a member) ----------
-adminRouter.get("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+// ---------- "Suggested by Sathsangath" (the team hand-picks a bride or groom for a member) ----------
+adminRouter.get("/suggestions", wrap(async (req, res) => {
   const who = { select: { id: true, profileCode: true, fullName: true, gender: true, city: true } };
   const pg = paging(req, 20, { allowedSorts: ["createdAt"] });
   const [total, rows] = await Promise.all([
@@ -588,7 +609,7 @@ adminRouter.get("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(asy
   ]);
   res.json(pg.envelope(total, rows));
 }));
-adminRouter.post("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+adminRouter.post("/suggestions", wrap(async (req, res) => {
   const d = z.object({ viewerId: z.string().min(1), profile: z.string().trim().min(1, "Enter the profile ID, for example SS-1004"), note: z.string().trim().max(300).optional() }).parse(req.body);
   const viewer = await prisma.member.findUnique({ where: { id: d.viewerId } });
   const profile = await prisma.member.findFirst({ where: { OR: [{ id: d.profile }, { profileCode: { equals: d.profile, mode: "insensitive" } }] } });
@@ -611,12 +632,12 @@ adminRouter.post("/suggestions", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(as
   await audit(adminId(req), "SUGGEST_PROFILE", "Member", viewer.id, { profile: profile.profileCode, note: d.note });
   res.status(existing ? 200 : 201).json({ id: sug.id, delivery });
 }));
-adminRouter.delete("/suggestions/:id", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+adminRouter.delete("/suggestions/:id", wrap(async (req, res) => {
   const s = await prisma.suggestion.delete({ where: { id: pid(req.params.id) } });
   await audit(adminId(req), "REMOVE_SUGGESTION", "Member", s.viewerId);
   res.json({ ok: true });
 }));
-adminRouter.patch("/suggestions/:id", requireAdmin(["SUPER_ADMIN", "ADMIN"]), wrap(async (req, res) => {
+adminRouter.patch("/suggestions/:id", wrap(async (req, res) => {
   const { note } = z.object({ note: z.string().trim().max(300).optional().or(z.literal("").transform(() => undefined)) }).parse(req.body);
   const s = await prisma.suggestion.update({ where: { id: pid(req.params.id) }, data: { note: note ?? null } });
   res.json({ ok: true, id: s.id, note: s.note });
@@ -827,22 +848,98 @@ adminRouter.patch("/notifications/:id", wrap(async (req, res) => { await prisma.
 
 adminRouter.get("/audit", wrap(async (req, res) => {
   const t = typeof req.query.actor === "string" ? req.query.actor : "";
+  // ?staff=<adminUserId> narrows the log to one admin-portal login. It implies the
+  // ADMIN actor type, so it overrides any ?actor rather than fighting with it.
+  const staff = typeof req.query.staff === "string" && req.query.staff ? req.query.staff : "";
   const pg = paging(req, 20, { allowedSorts: ["createdAt", "actorType", "action"] });
-  const where = t ? { actorType: t } : {};
+  const where: Prisma.AuditLogWhereInput = staff ? { adminId: staff } : t ? { actorType: t } : {};
   const [total, rows] = await Promise.all([
     prisma.auditLog.count({ where }),
     prisma.auditLog.findMany({ where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { admin: { select: { name: true } } } }),
   ]);
-  res.json(pg.envelope(total, rows.map((l) => ({ id: l.id, actorType: l.actorType, actor: l.admin?.name ?? l.actorName ?? (l.actorType === "PUBLIC" ? "Website visitor" : "System"), action: l.action, entity: l.entity, entityId: l.entityId, detail: l.detail, createdAt: l.createdAt }))));
+  res.json(pg.envelope(total, rows.map((l) => ({ id: l.id, actorType: l.actorType, actor: l.admin?.name ?? l.actorName ?? (l.actorType === "PUBLIC" ? "Website visitor" : "System"), adminId: l.adminId, action: l.action, entity: l.entity, entityId: l.entityId, detail: l.detail, createdAt: l.createdAt }))));
 }));
 
 // ---------- Staff ----------
-adminRouter.get("/staff", requireAdmin(["SUPER_ADMIN"]), wrap(async (_req, res) => {
-  res.json(await prisma.adminUser.findMany({ select: { id: true, name: true, email: true, role: true, active: true, createdAt: true } }));
+// Every admin-portal login is one AdminUser row, so the activity log can name the
+// person behind each action. There is no RBAC: staff can do everything the owner
+// can EXCEPT manage these logins, which is why only this block is owner-gated.
+const requireOwner = requireAdmin([OWNER_ROLE]);
+const staffShape = { id: true, name: true, email: true, role: true, active: true, mustChangePassword: true, createdAt: true } as const;
+const staffOut = (a: { role: string } & Record<string, unknown>) => ({ ...a, role: normaliseRole(a.role) });
+const staffPassword = z.string().min(8, "Use at least 8 characters").regex(/[A-Za-z]/, "Include a letter").regex(/\d/, "Include a number");
+
+/** Names for the activity log's "who" filter. Any admin may read this: it is the
+ *  staff list without emails or status, and the log already prints these names. */
+adminRouter.get("/staff/names", wrap(async (_req, res) => {
+  res.json(await prisma.adminUser.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }));
 }));
-adminRouter.post("/staff", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
-  const d = z.object({ name: z.string().trim().min(2), email: z.string().trim().email(), password: z.string().min(8, "Use at least 8 characters"), role: z.enum(["ADMIN", "STAFF"]) }).parse(req.body);
-  const a = await prisma.adminUser.create({ data: { name: d.name, email: d.email.toLowerCase(), role: d.role, passwordHash: await bcrypt.hash(d.password, 11) } });
-  await audit(adminId(req), "CREATE", "AdminUser", a.id);
-  res.status(201).json({ id: a.id });
+
+adminRouter.get("/staff", requireOwner, wrap(async (req, res) => {
+  const rows = await prisma.adminUser.findMany({ orderBy: [{ active: "desc" }, { createdAt: "asc" }], select: staffShape });
+  res.json({ me: adminId(req), items: rows.map(staffOut) });
+}));
+
+/**
+ * Creates a login with a temporary password and returns it in plaintext ONCE, the
+ * same way an admin issues a member's password: nothing is emailed, the owner shares
+ * it however they like, and mustChangePassword forces the staff member to replace it
+ * at first login so the owner does not keep knowing it.
+ */
+adminRouter.post("/staff", requireOwner, wrap(async (req, res) => {
+  const d = z.object({
+    name: z.string().trim().min(2, "Enter the person's name"),
+    email: z.string().trim().email("Enter a valid email"),
+    password: staffPassword.optional(),
+  }).parse(req.body);
+  const email = d.email.toLowerCase();
+  if (await prisma.adminUser.findUnique({ where: { email } })) {
+    throw new HttpError(409, "An admin login with this email already exists.", { fields: { email: "Already in use" } });
+  }
+  const pw = d.password ?? tempPassword();
+  // New logins are always staff. The owner role is not handed out from the portal.
+  const a = await prisma.adminUser.create({ data: { name: d.name, email, role: "STAFF", passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
+  await audit(adminId(req), "CREATE_STAFF", "AdminUser", a.id, { name: a.name });
+  res.status(201).json({ id: a.id, password: pw });
+}));
+
+async function staffById(id: unknown) {
+  const a = await prisma.adminUser.findUnique({ where: { id: pid(id) }, select: staffShape });
+  if (!a) throw new HttpError(404, "Admin login not found.");
+  return a;
+}
+
+adminRouter.patch("/staff/:id", requireOwner, wrap(async (req, res) => {
+  const d = z.object({
+    name: z.string().trim().min(2, "Enter the person's name").optional(),
+    email: z.string().trim().email("Enter a valid email").optional(),
+    active: z.boolean().optional(),
+  }).parse(req.body);
+  const a = await staffById(req.params.id);
+  // The owner's own row is never deactivated, and nobody deactivates themselves:
+  // either would leave the portal with nobody able to manage its logins.
+  if (d.active === false) {
+    if (a.id === adminId(req)) throw new HttpError(422, "You cannot deactivate your own login.");
+    if (isOwner(a.role)) throw new HttpError(422, "The owner's login cannot be deactivated.");
+  }
+  const email = d.email?.toLowerCase();
+  if (email && email !== a.email) {
+    const clash = await prisma.adminUser.findUnique({ where: { email } });
+    if (clash) throw new HttpError(409, "An admin login with this email already exists.", { fields: { email: "Already in use" } });
+  }
+  const updated = await prisma.adminUser.update({ where: { id: a.id }, data: { ...(d.name && { name: d.name }), ...(email && { email }), ...(d.active !== undefined && { active: d.active }) }, select: staffShape });
+  // Turning a login on or off is the entry an owner will look for later, so it is
+  // logged as its own action rather than as a generic edit.
+  const action = d.active === undefined ? "EDIT_STAFF" : d.active ? "REACTIVATE_STAFF" : "DEACTIVATE_STAFF";
+  await audit(adminId(req), action, "AdminUser", a.id, { name: updated.name });
+  res.json(staffOut(updated));
+}));
+
+/** A locked-out staff member gets a fresh temporary password, shown once. */
+adminRouter.post("/staff/:id/reset-password", requireOwner, wrap(async (req, res) => {
+  const a = await staffById(req.params.id);
+  const pw = tempPassword();
+  await prisma.adminUser.update({ where: { id: a.id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
+  await audit(adminId(req), "RESET_STAFF_PASSWORD", "AdminUser", a.id, { name: a.name });
+  res.json({ ok: true, password: pw });
 }));
