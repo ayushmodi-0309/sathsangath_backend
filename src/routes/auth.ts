@@ -6,7 +6,7 @@ import { z } from "zod";
 import { rateLimit } from "express-rate-limit";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
-import { signToken, requireMember, requireAdmin } from "../lib/auth";
+import { signToken, requireMember, requireAdmin, normaliseRole } from "../lib/auth";
 import { activity, audit, memberLabel, normPhone } from "../lib/util";
 import { toSelf } from "../lib/serializers";
 import { includeTags } from "../lib/matching";
@@ -154,12 +154,32 @@ authRouter.post("/reset-password", useLimiter, wrap(async (req, res) => {
 authRouter.post("/admin/login", loginLimiter, wrap(async (req, res) => {
   const { email, password } = z.object({ email: z.string().trim().email("Enter a valid email"), password: z.string().min(1, "Enter your password") }).parse(req.body);
   const a = await prisma.adminUser.findUnique({ where: { email: email.toLowerCase() } });
+  // One message for a wrong password, an unknown email and a deactivated login alike:
+  // a deactivated staff member must not learn their login still exists.
   if (!a?.active || !(await bcrypt.compare(password, a.passwordHash))) throw new HttpError(401, "Incorrect email or password.");
   await audit(a.id, "LOGIN", "AdminUser", a.id);
-  res.json({ token: signToken({ kind: "admin", id: a.id, role: a.role }), admin: { id: a.id, name: a.name, email: a.email, role: a.role } });
+  res.json({
+    token: signToken({ kind: "admin", id: a.id, role: normaliseRole(a.role) }),
+    admin: { id: a.id, name: a.name, email: a.email, role: normaliseRole(a.role), mustChangePassword: a.mustChangePassword },
+  });
 }));
 
 authRouter.get("/admin/me", requireAdmin(), wrap(async (req, res) => {
   const a = await prisma.adminUser.findUniqueOrThrow({ where: { id: req.actor!.id } });
-  res.json({ id: a.id, name: a.name, email: a.email, role: a.role });
+  res.json({ id: a.id, name: a.name, email: a.email, role: normaliseRole(a.role), mustChangePassword: a.mustChangePassword });
+}));
+
+/**
+ * An admin changes their own password. The owner never learns it: the temporary
+ * password they issue is replaced here, and mustChangePassword - which the portal
+ * uses to hold a new staff member on this screen - is cleared only on success.
+ */
+authRouter.post("/admin/change-password", requireAdmin(), wrap(async (req, res) => {
+  const { currentPassword, newPassword } = z.object({ currentPassword: z.string().min(1, "Enter your current password"), newPassword: passwordRule }).parse(req.body);
+  const a = await prisma.adminUser.findUniqueOrThrow({ where: { id: req.actor!.id } });
+  if (!(await bcrypt.compare(currentPassword, a.passwordHash))) throw new HttpError(422, "Current password is incorrect.", { fields: { currentPassword: "Current password is incorrect" } });
+  if (currentPassword === newPassword) throw new HttpError(422, "Choose a different password from the current one.", { fields: { newPassword: "Choose a different password" } });
+  await prisma.adminUser.update({ where: { id: a.id }, data: { passwordHash: await bcrypt.hash(newPassword, 11), mustChangePassword: false } });
+  await audit(a.id, "CHANGED_PASSWORD", "AdminUser", a.id);
+  res.json({ ok: true });
 }));
