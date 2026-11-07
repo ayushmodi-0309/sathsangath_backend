@@ -474,7 +474,7 @@ adminRouter.delete("/members/:id/photos/:photoId", wrap(async (req, res) => {
 async function issueCredentials(id: string) {
   const pw = tempPassword();
   const m = await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
-  return sendCredentials(m, pw); // { email, sms }: "sent" | "skipped" | "failed"
+  return sendCredentials(m, pw); // { email, sms }: "sent" | "failed" | "no-address" | "not-configured"
 }
 
 adminRouter.post("/members/:id/approve", wrap(async (req, res) => {
