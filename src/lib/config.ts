@@ -12,7 +12,7 @@ export const config = {
   webLoginUrl: process.env.WEB_LOGIN_URL ?? "https://www.sathsangath.in/login",
   /** Where a "forgot password" link points. Derived from the login URL unless set explicitly. */
   webResetUrl: process.env.WEB_RESET_URL
-    ?? (process.env.WEB_LOGIN_URL ?? "https://sathsangath-frontend.vercel.app/login").replace(/\/login\/?$/, "/reset-password"),
+    ?? (process.env.WEB_LOGIN_URL ?? "https://www.sathsangath.in/login").replace(/\/login\/?$/, "/reset-password"),
   /** Registration needs an ID proof upload (Aadhaar, or green card / visa / passport for non-Indians). Set REQUIRE_ID_PROOF=false to make it optional. */
   requireIdProof: process.env.REQUIRE_ID_PROOF !== "false",
   mail: {
