@@ -1,6 +1,6 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { config } from "./config";
-import { LOGO_PNG_BASE64 } from "../assets/email/logo-data";
+import { LOGO_WHITE_PNG_BASE64 as LOGO_PNG_BASE64 } from "../assets/email/logo-white-data";
 
 export type Delivery = "sent" | "failed" | "no-address" | "not-configured";
 export const LOGO_CID = "sathsangath-logo";

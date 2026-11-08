@@ -9,7 +9,7 @@ import path from "path";
 import { mailConfigured, sendMail, verifyMail, LOGO_CID } from "../src/lib/mailer";
 import { smsConfigured } from "../src/lib/sms";
 import { correctionEmail, credentialsEmail, mutualEmail, receivedEmail, rejectionEmail } from "../src/lib/email-templates";
-import { LOGO_PNG_BASE64 } from "../src/assets/email/logo-data";
+import { LOGO_WHITE_PNG_BASE64 as LOGO_PNG_BASE64 } from "../src/assets/email/logo-white-data";
 
 (async () => {
   const demo = { fullName: "Aarav Mehta", profileCode: "SS-1001", phone: "9000000001", email: "aarav@example.com" };
