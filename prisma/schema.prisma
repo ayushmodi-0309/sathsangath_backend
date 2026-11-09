@@ -8,13 +8,21 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// A separate admin-portal login per person, so the activity log names who did what.
+// Two roles only: SUPER_ADMIN is the owner, STAFF is everyone else. There is no RBAC
+// yet - staff can do everything the owner can except manage staff logins, which is
+// enforced with requireAdmin(["SUPER_ADMIN"]) on the /admin/staff routes. The legacy
+// "ADMIN" value is treated as STAFF everywhere (see isOwner in lib/auth).
 model AdminUser {
   id           String   @id @default(cuid())
   name         String
   email        String   @unique
   passwordHash String
-  role         String   @default("ADMIN") // SUPER_ADMIN | ADMIN | STAFF
+  role         String   @default("STAFF") // SUPER_ADMIN (owner) | STAFF
   active       Boolean  @default(true)
+  // Set when the owner issues or resets a temporary password: the admin must choose
+  // their own before they can use the portal.
+  mustChangePassword Boolean @default(false)
   createdAt    DateTime @default(now())
   audits       AuditLog[]
 }

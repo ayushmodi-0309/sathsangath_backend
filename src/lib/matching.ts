@@ -1,6 +1,9 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { ageFrom } from "./util";
+import { mutualSelect, publicSelect, type MutualMember, type PublicMember } from "./serializers";
 
+/** Member + tags + photos + plans: the whole record, for the admin portal and a member's own account. */
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
   photos: { orderBy: [{ isMain: "desc" as const }, { createdAt: "asc" as const }] },
@@ -33,90 +36,199 @@ export type FeedFilters = {
 };
 // NOTE: income is deliberately not filterable. It is only revealed after a mutual like, and filtering on it would leak it.
 
-const oneOf = (wanted: string[] | undefined, value: string | null) =>
-  !wanted?.length || (!!value && wanted.some((w) => w.toLowerCase() === value.trim().toLowerCase()));
+/** The text columns a member can filter the feed on. */
+type TextFilterField = "city" | "maritalStatus" | "education" | "profession" | "diet" | "community"
+  | "subCommunity" | "state" | "motherTongue" | "familyType" | "nativePlace";
 
-type Candidate = Awaited<ReturnType<typeof curatedFeed>>[number];
+const TEXT_FILTER_FIELDS = ["city", "maritalStatus", "education", "profession", "diet", "community",
+  "subCommunity", "state", "motherTongue", "familyType", "nativePlace"] as const satisfies readonly TextFilterField[];
 
-function applyFilters(items: Candidate[], f: FeedFilters, viewerCity?: string | null) {
-  const code = f.code?.trim().toLowerCase();
-  const since = Date.now() - 14 * 86400000;
-  const out = items.filter((c) => {
-    if (code && !c.profileCode.toLowerCase().includes(code)) return false;
-    if (f.hasPhoto && !c.photoUrl) return false;
-    if (f.justJoined && !(c.approvedAt && c.approvedAt.getTime() >= since)) return false;
-    if (f.nearby && (!viewerCity || c.city?.trim().toLowerCase() !== viewerCity.trim().toLowerCase())) return false;
-    const age = ageFrom(c.dob);
-    if (f.ageMin !== undefined && age < f.ageMin) return false;
-    if (f.ageMax !== undefined && age > f.ageMax) return false;
-    if (f.heightMin !== undefined && (c.heightCm == null || c.heightCm < f.heightMin)) return false;
-    if (f.heightMax !== undefined && (c.heightCm == null || c.heightCm > f.heightMax)) return false;
-    return oneOf(f.city, c.city) && oneOf(f.maritalStatus, c.maritalStatus) && oneOf(f.education, c.education)
-      && oneOf(f.profession, c.profession) && oneOf(f.diet, c.diet) && oneOf(f.community, c.community)
-      && oneOf(f.subCommunity, c.subCommunity) && oneOf(f.state, c.state) && oneOf(f.motherTongue, c.motherTongue)
-      && oneOf(f.familyType, c.familyType) && oneOf(f.nativePlace, c.nativePlace);
-  });
-  // The feed arrives newest-approved first; only re-sort when asked.
-  const by: Record<string, (a: Candidate, b: Candidate) => number> = {
-    ageAsc: (a, b) => ageFrom(a.dob) - ageFrom(b.dob), ageDesc: (a, b) => ageFrom(b.dob) - ageFrom(a.dob),
-    heightAsc: (a, b) => (a.heightCm ?? 1e9) - (b.heightCm ?? 1e9), heightDesc: (a, b) => (b.heightCm ?? -1) - (a.heightCm ?? -1),
-  };
-  return f.sort && by[f.sort] ? [...out].sort(by[f.sort]) : out;
+/** A profile as the browse feed serves it. */
+export type Candidate = PublicMember;
+
+/** "Has a photo", as the feed and the filter counts both mean it: set, and not blank. */
+const HAS_PHOTO: Prisma.MemberWhereInput = { photoUrl: { not: null }, NOT: { photoUrl: "" } };
+
+/**
+ * The `dob` of someone whose birthday is today and who turns `age` today.
+ *
+ * This is the boundary ageFrom() uses, so `dob <= dobAt(n)` is exactly
+ * "aged n or older" and `dob > dobAt(n + 1)` is exactly "aged n or younger".
+ * Age filters are translated this way rather than computed per row, so the
+ * database can do them.
+ */
+const dobAt = (age: number) => {
+  const n = new Date();
+  return new Date(n.getFullYear() - age, n.getMonth(), n.getDate());
+};
+
+/**
+ * Case-insensitive "is one of", matching the old in-memory comparison. The
+ * values come straight back from filterOptionsFor(), which hands out the
+ * trimmed values actually present in the feed, so these compare equal.
+ */
+const textIn = (field: TextFilterField, wanted?: string[]): Prisma.MemberWhereInput | null => {
+  const vals = [...new Set((wanted ?? []).map((w) => w.trim()).filter(Boolean))];
+  return vals.length
+    ? { OR: vals.map((v) => ({ [field]: { equals: v, mode: "insensitive" } } as Prisma.MemberWhereInput)) }
+    : null;
+};
+
+/** Ordering per `sort`. Age is dob inverted; height puts the unknowns last, as the old comparators did. */
+const ORDER: Record<NonNullable<FeedFilters["sort"]>, Prisma.MemberOrderByWithRelationInput> = {
+  new: { approvedAt: "desc" },
+  ageAsc: { dob: "desc" },
+  ageDesc: { dob: "asc" },
+  heightAsc: { heightCm: { sort: "asc", nulls: "last" } },
+  heightDesc: { heightCm: { sort: "desc", nulls: "last" } },
+};
+
+/**
+ * The viewer's feed, as a set of conditions rather than rows: every APPROVED
+ * profile of the opposite gender, minus themselves and minus anyone our team
+ * has explicitly hidden from them.
+ *
+ * The viewer's stored partner preferences are deliberately NOT applied. Narrowing the feed
+ * by them left members with very little to look at and no way to tell why, so the feed starts
+ * wide and the member narrows it themselves with the filters on the Feed screen, which arrive as
+ * `FeedFilters`. Preferences are still recorded on the profile for the admin team to match on.
+ *
+ * A HIDE override is the only thing that keeps an approved profile out of the feed. SHOW
+ * overrides and admin suggestions no longer affect membership: they existed to push a profile
+ * past the preference filters, and every approved profile is now in the feed to begin with.
+ * Suggestions are still flagged on the items the /matches route returns.
+ *
+ * The overrides are a correlated `none` rather than a fetched id list, so no
+ * override row ever crosses the wire.
+ */
+async function feedScope(viewerId: string) {
+  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true, city: true } });
+  const conditions: Prisma.MemberWhereInput[] = [
+    { status: "APPROVED" },
+    { id: { not: viewerId } },
+    { gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },
+    { overridesAsProfile: { none: { viewerId, action: "HIDE" } } },
+  ];
+  return { conditions, viewerCity: viewer.city };
 }
 
-/** Distinct values (and age/height ranges) present in the viewer's own feed, so the app only offers filters that can match. */
-export async function filterOptionsFor(viewerId: string) {
-  const feed = await matchesFor(viewerId);
-  const distinct = (pick: (c: Candidate) => string | null) =>
-    [...new Set(feed.map(pick).filter((v): v is string => !!v && !!v.trim()).map((v) => v.trim()))].sort((a, b) => a.localeCompare(b));
-  const ages = feed.map((c) => ageFrom(c.dob));
-  const heights = feed.map((c) => c.heightCm).filter((h): h is number => h != null);
-  return {
-    ageMin: ages.length ? Math.min(...ages) : null, ageMax: ages.length ? Math.max(...ages) : null,
-    heightMin: heights.length ? Math.min(...heights) : null, heightMax: heights.length ? Math.max(...heights) : null,
-    cities: distinct((c) => c.city), maritalStatuses: distinct((c) => c.maritalStatus), educations: distinct((c) => c.education),
-    professions: distinct((c) => c.profession), diets: distinct((c) => c.diet), communities: distinct((c) => c.community),
-    subCommunities: distinct((c) => c.subCommunity), states: distinct((c) => c.state), motherTongues: distinct((c) => c.motherTongue),
-    familyTypes: distinct((c) => c.familyType), nativePlaces: distinct((c) => c.nativePlace),
-    withPhoto: feed.filter((c) => !!c.photoUrl).length, total: feed.length,
-  };
+/** One condition per active filter. Everything the member can narrow by is expressible in SQL. */
+function filterConditions(f: FeedFilters, viewerCity: string | null): Prisma.MemberWhereInput[] {
+  const and: Prisma.MemberWhereInput[] = [];
+  const code = f.code?.trim();
+  if (code) and.push({ profileCode: { contains: code, mode: "insensitive" } });
+  if (f.hasPhoto) and.push(HAS_PHOTO);
+  if (f.justJoined) and.push({ approvedAt: { gte: new Date(Date.now() - 14 * 86400000) } });
+  // A viewer with no city of their own has no "nearby": `in: []` matches nothing,
+  // which is what the old per-row check did.
+  if (f.nearby) and.push(viewerCity?.trim() ? { city: { equals: viewerCity.trim(), mode: "insensitive" } } : { id: { in: [] } });
+  if (f.ageMin !== undefined) and.push({ dob: { lte: dobAt(f.ageMin) } });
+  if (f.ageMax !== undefined) and.push({ dob: { gt: dobAt(f.ageMax + 1) } });
+  // A null height fails a range test in SQL just as it did in the old comparison.
+  if (f.heightMin !== undefined) and.push({ heightCm: { gte: f.heightMin } });
+  if (f.heightMax !== undefined) and.push({ heightCm: { lte: f.heightMax } });
+  for (const field of TEXT_FILTER_FIELDS) {
+    const w = textIn(field, f[field]);
+    if (w) and.push(w);
+  }
+  return and;
 }
 
-/** Profiles the admin team suggested to this member, keyed by profile id. */
-export async function suggestionsFor(viewerId: string) {
-  const rows = await prisma.suggestion.findMany({ where: { viewerId }, orderBy: { createdAt: "desc" } });
-  return new Map(rows.map((r) => [r.profileId, r]));
+export type FeedPage = { items: Candidate[]; total: number };
+
+/**
+ * One page of the viewer's feed, and the number of profiles their filters match.
+ *
+ * EGRESS: filtering, sorting and paging all happen in Postgres, so only the
+ * rows on the page in hand cross the wire. This used to read every approved
+ * profile of the opposite gender — all columns, plus the tag, photo and plan
+ * joins — and then filter, sort and slice in memory, which meant ~400 rows
+ * fetched to serve 12, on every page flip.
+ *
+ * `exclude` drops the viewer's mutual matches: those live in the Interests tab,
+ * not in the browse feed. Ordering is tie-broken on `id` so that paging is
+ * stable — without it, two profiles sharing an approvedAt (or a height) can
+ * swap places between requests and show up twice, or not at all, as the member
+ * scrolls.
+ */
+export async function feedPage(viewerId: string, filters: FeedFilters, page: number, pageSize: number, exclude: Set<string>): Promise<FeedPage> {
+  const { conditions, viewerCity } = await feedScope(viewerId);
+  const where: Prisma.MemberWhereInput = {
+    AND: [
+      ...conditions,
+      ...filterConditions(filters, viewerCity),
+      ...(exclude.size ? [{ id: { notIn: [...exclude] } }] : []),
+    ],
+  };
+  const [total, items] = await Promise.all([
+    prisma.member.count({ where }),
+    prisma.member.findMany({
+      where,
+      select: publicSelect,
+      orderBy: [ORDER[filters.sort ?? "new"], { id: "asc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ]);
+  return { total, items };
 }
 
 /**
- * The feed for one viewer: every APPROVED profile of the opposite gender, newest approval first.
+ * One profile, if this viewer is allowed to open it: it is in their feed, or
+ * the two of them have liked each other.
  *
- * The viewer's stored partner preferences are deliberately NOT applied here. Narrowing the feed
- * by them left members with very little to look at and no way to tell why, so the feed starts
- * wide and the member narrows it themselves with the filters on the Feed screen, which arrive as
- * `filters`. Preferences are still recorded on the profile for the admin team to match on.
+ * EGRESS: a single row. This used to build the viewer's entire feed and then
+ * search it in memory, so opening one profile — or liking it — read every
+ * approved profile out of the database to answer a question about one of them.
  */
-export async function matchesFor(viewerId: string, filters?: FeedFilters) {
-  const feed = await curatedFeed(viewerId);
-  if (!filters) return feed;
-  const viewerCity = filters.nearby ? (await prisma.member.findUnique({ where: { id: viewerId }, select: { city: true } }))?.city : undefined;
-  return applyFilters(feed, filters, viewerCity);
+export async function visibleProfile(viewerId: string, profileId: string, isMutual: boolean): Promise<MutualMember | null> {
+  // A mutual match stays reachable even if our team has since hidden them from
+  // this viewer's feed, which is what the old lookup fell back to.
+  if (isMutual) return prisma.member.findFirst({ where: { id: profileId, status: "APPROVED" }, select: mutualSelect });
+  const { conditions } = await feedScope(viewerId);
+  return prisma.member.findFirst({ where: { AND: [...conditions, { id: profileId }] }, select: mutualSelect });
 }
 
-async function curatedFeed(viewerId: string) {
-  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true } });
-  const hidden = await prisma.visibilityOverride.findMany({ where: { viewerId, action: "HIDE" }, select: { profileId: true } });
-  const hide = new Set(hidden.map((o) => o.profileId));
+/** Ids of the profiles our team suggested to this member. */
+export async function suggestionsFor(viewerId: string) {
+  const rows = await prisma.suggestion.findMany({ where: { viewerId }, select: { profileId: true } });
+  return new Set(rows.map((r) => r.profileId));
+}
 
-  const candidates = await prisma.member.findMany({
-    where: { status: "APPROVED", id: { not: viewerId }, gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },
-    include: includeTags,
-    orderBy: { approvedAt: "desc" },
-  });
+/**
+ * Distinct values (and age/height ranges) present in the viewer's own feed, so the app only offers filters that can match.
+ *
+ * EGRESS: aggregates, so Postgres does the work and sends back only the
+ * distinct values themselves. This used to pull the whole feed in order to
+ * reduce it in memory, which cost as much as the feed itself on every load of
+ * the Feed screen.
+ */
+export async function filterOptionsFor(viewerId: string) {
+  const { conditions } = await feedScope(viewerId);
+  const where: Prisma.MemberWhereInput = { AND: conditions };
 
-  // A HIDE override is the only thing that keeps an approved profile out of the feed. SHOW
-  // overrides and admin suggestions no longer affect membership: they existed to push a profile
-  // past the preference filters, and every approved profile is now in the feed to begin with.
-  // Suggestions are still flagged on the items the /matches route returns.
-  return candidates.filter((c) => !hide.has(c.id));
+  const distinct = async (field: TextFilterField) => {
+    const rows = await prisma.member.groupBy({ by: [field], where });
+    const vals = (rows as Array<Record<string, string | null>>).map((r) => (r[field] ?? "").trim()).filter(Boolean);
+    return [...new Set(vals)].sort((a, b) => a.localeCompare(b));
+  };
+
+  const [texts, range, total, withPhoto] = await Promise.all([
+    Promise.all(TEXT_FILTER_FIELDS.map(distinct)),
+    prisma.member.aggregate({ where, _min: { dob: true, heightCm: true }, _max: { dob: true, heightCm: true } }),
+    prisma.member.count({ where }),
+    prisma.member.count({ where: { AND: [...conditions, HAS_PHOTO] } }),
+  ]);
+  const [cities, maritalStatuses, educations, professions, diets, communities,
+    subCommunities, states, motherTongues, familyTypes, nativePlaces] = texts;
+
+  return {
+    // ageFrom() inverts dob: the earliest date of birth in the feed is the eldest member.
+    ageMin: range._max.dob ? ageFrom(range._max.dob) : null,
+    ageMax: range._min.dob ? ageFrom(range._min.dob) : null,
+    heightMin: range._min.heightCm, heightMax: range._max.heightCm,
+    cities, maritalStatuses, educations, professions, diets, communities,
+    subCommunities, states, motherTongues, familyTypes, nativePlaces,
+    withPhoto, total,
+  };
 }

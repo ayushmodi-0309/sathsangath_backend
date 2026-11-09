@@ -1,10 +1,11 @@
 import { Router, type RequestHandler } from "express";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
-import { matchesFor, filterOptionsFor, includeTags, mutualIds, suggestionsFor } from "../lib/matching";
-import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
+import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, visibleProfile } from "../lib/matching";
+import { mutualSelect, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone, isCountry } from "../lib/phone";
@@ -27,6 +28,12 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const me = (req: { actor?: { id: string } }) => req.actor!.id;
+/**
+ * Just enough of a member to notify them: the email and SMS templates, the
+ * push, and the activity log. Contact details and the device token are private,
+ * so they are not part of mutualSelect and are read here on their own.
+ */
+const notifySelect = { id: true, fullName: true, profileCode: true, phone: true, email: true, fcmToken: true } satisfies Prisma.MemberSelect;
 const loadMe = (id: string) => prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
 const who = (m: { id: string; profileCode: string; fullName: string }) => ({ type: "MEMBER" as const, memberId: m.id, name: memberLabel(m) });
 
@@ -287,19 +294,18 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
     sort: z.enum(["new", "ageAsc", "ageDesc", "heightAsc", "heightDesc"]).optional(),
   }).parse(req.query);
   const { page: _p, pageSize: _s, ...filters } = q;
-  const [all, mutual, likes, suggested] = await Promise.all([
-    matchesFor(me(req), filters), mutualIds(me(req)),
+  const [mutual, likes, suggested] = await Promise.all([
+    mutualIds(me(req)),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
     suggestionsFor(me(req)),
   ]);
+  // Mutual matches are not part of the browse feed — they live in the Interests tab,
+  // so feedPage() excludes them and every item here is a non-mutual profile.
+  const { items, total } = await feedPage(me(req), filters, q.page, q.pageSize, mutual);
   const liked = new Set(likes.map((l) => l.likedId));
-  // Mutual matches are not part of the browse feed — they live in the Interests tab.
-  // Filtered here rather than in matchesFor(), which also backs profile visibility.
-  const feed = all.filter((m) => !mutual.has(m.id));
-  const slice = feed.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
   res.json({
-    total: feed.length, page: q.page, pageSize: q.pageSize,
-    items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id), suggested: suggested.has(m.id) }))),
+    total, page: q.page, pageSize: q.pageSize,
+    items: await Promise.all(items.map(async (m) => ({ ...(await toPublicProfile(m)), liked: liked.has(m.id), mutual: false, suggested: suggested.has(m.id) }))),
   });
 }));
 
@@ -309,9 +315,8 @@ memberRouter.get("/matches/filter-options", requireApproved, wrap(async (req, re
 
 /** A profile can be opened if it is in the viewer's curated feed, or if the two members liked each other. */
 async function loadVisible(viewerId: string, profileId: string) {
-  const [feed, mutual] = await Promise.all([matchesFor(viewerId), mutualIds(viewerId)]);
-  const isMutual = mutual.has(profileId);
-  const p = feed.find((m) => m.id === profileId) ?? (isMutual ? await prisma.member.findFirst({ where: { id: profileId, status: "APPROVED" }, include: includeTags }) : null);
+  const isMutual = (await mutualIds(viewerId)).has(profileId);
+  const p = await visibleProfile(viewerId, profileId, isMutual);
   if (!p) throw new HttpError(404, "This profile is not available.");
   return { p, isMutual };
 }
@@ -333,7 +338,7 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   let isMutual: boolean;
   const isSelf = viewerId === profileId;
   if (isSelf) {
-    const row = await prisma.member.findFirst({ where: { id: profileId }, include: includeTags });
+    const row = await prisma.member.findFirst({ where: { id: profileId }, select: mutualSelect });
     if (!row) throw new HttpError(404, "This profile is not available.");
     p = row;
     isMutual = false;
@@ -369,7 +374,10 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
   let mutual = false;
   if (!existing) {
     await prisma.like.create({ data: { likerId: me(req), likedId: p.id } });
-    const meRow = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } });
+    const [meRow, them] = await Promise.all([
+      prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: notifySelect }),
+      prisma.member.findUniqueOrThrow({ where: { id: p.id }, select: notifySelect }),
+    ]);
     await activity(who(meRow), "LIKED_PROFILE", "Member", p.id, { profile: p.profileCode });
     const back = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: p.id, likedId: me(req) } } });
     if (back) {
@@ -381,23 +389,23 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
           body: `${first(meRow.fullName)} (${meRow.profileCode}) liked your profile as well. You can now view their profile properly.`, data: JSON.stringify({ memberId: meRow.id }) } }),
         // the person who just liked
         prisma.notification.create({ data: { audience: "MEMBER", memberId: meRow.id, type: "MUTUAL_LIKE", title: "It's a match! 💞",
-          body: `${first(p.fullName)} (${p.profileCode}) had already liked you. You can now view their profile properly.`, data: JSON.stringify({ memberId: p.id }) } }),
+          body: `${first(them.fullName)} (${them.profileCode}) had already liked you. You can now view their profile properly.`, data: JSON.stringify({ memberId: them.id }) } }),
         // staff bell
         prisma.notification.create({ data: { audience: "ADMIN", type: "MUTUAL_LIKE", title: "Mutual like",
-          body: `${memberLabel(meRow)} and ${memberLabel(p)} liked each other.`, data: JSON.stringify({ a: meRow.id, b: p.id }) } }),
+          body: `${memberLabel(meRow)} and ${memberLabel(them)} liked each other.`, data: JSON.stringify({ a: meRow.id, b: them.id }) } }),
       ]);
       await activity(who(meRow), "MUTUAL_MATCH", "Member", p.id, { with: p.profileCode });
       // email + SMS to both people (each call is best-effort and never throws)
-      await Promise.all([sendMutualMatch(meRow, p), sendMutualMatch(p, meRow)]);
+      await Promise.all([sendMutualMatch(meRow, them), sendMutualMatch(them, meRow)]);
       // push to both members — must be awaited before res.json() or Vercel kills the fn
       await Promise.allSettled([
-        sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(p.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: p.id }),
-        sendPush(p.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id }),
+        sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(them.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: them.id }),
+        sendPush(them.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id }),
       ]);
     } else {
       // not mutual yet — notify the liked person
       // memberId lets the app open the liker's profile from the notification.
-      await sendPush(p.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED", memberId: me(req) });
+      await sendPush(them.fcmToken, "Someone liked your profile! 💌", "Check who liked you on Sathsangath.", { type: "LIKE_RECEIVED", memberId: me(req) });
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });
@@ -407,7 +415,7 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   const otherId = String(req.params.id);
   const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: otherId } });
   if (r.count) {
-    const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } });
+    const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { id: true, profileCode: true, fullName: true } });
     await activity(who(m), "REMOVED_LIKE", "Member", otherId);
     // Close any open intro requests between the two members (mutual access revoked)
     await prisma.introRequest.updateMany({
@@ -426,7 +434,7 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
 
 memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
   const [likes, mutual] = await Promise.all([
-    prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, include: { liker: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
+    prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
   ]);
   res.json(await Promise.all(likes.map(async (l) => {
@@ -437,9 +445,9 @@ memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
 
 memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
   const [likes, mutual, intros, suggested] = await Promise.all([
-    prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, include: { liked: { include: includeTags } }, orderBy: { createdAt: "desc" } }),
+    prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, select: { likedId: true, createdAt: true, liked: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
-    prisma.introRequest.findMany({ where: { requesterId: me(req) } }),
+    prisma.introRequest.findMany({ where: { requesterId: me(req) }, select: { targetId: true, status: true } }),
     suggestionsFor(me(req)),
   ]);
   const byTarget = new Map(intros.map((i) => [i.targetId, i]));
@@ -452,10 +460,10 @@ memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
 /** "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first). */
 memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const [rows, likes, mutual, intros] = await Promise.all([
-    prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, include: { profile: { include: includeTags } } }),
+    prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, select: { profileId: true, note: true, createdAt: true, profile: { select: mutualSelect } } }),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
     mutualIds(me(req)),
-    prisma.introRequest.findMany({ where: { requesterId: me(req) } }),
+    prisma.introRequest.findMany({ where: { requesterId: me(req) }, select: { targetId: true, status: true } }),
   ]);
   const liked = new Set(likes.map((l) => l.likedId)); const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(rows.map(async (r) => {
@@ -479,7 +487,7 @@ memberRouter.post("/introductions", requireApproved, wrap(async (req, res) => {
   } else {
     r = existing; // already active — idempotent
   }
-  const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } });
+  const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { id: true, profileCode: true, fullName: true } });
   await activity(who(m), "REQUESTED_INTRODUCTION", "IntroRequest", r.id);
   res.status(201).json({ status: r.status, label: STATUS_LABEL[r.status] });
 }));

@@ -17,6 +17,18 @@ function readActor(req: Request): Actor {
   catch { throw new HttpError(401, "Your session has expired. Please log in again."); }
 }
 
+/**
+ * The portal has one privileged role. Owner accounts carry SUPER_ADMIN; everything
+ * else - including rows left over from the older three-role scheme, which stored
+ * "ADMIN" - is ordinary staff. Nothing compares role strings directly, so adding
+ * real RBAC later means changing this file and the route guards, not both plus
+ * every call site.
+ */
+export const OWNER_ROLE = "SUPER_ADMIN";
+export const isOwner = (role: string | undefined) => role === OWNER_ROLE;
+/** What the portal shows and stores for a login: an old "ADMIN" row reads as STAFF. */
+export const normaliseRole = (role: string) => (isOwner(role) ? OWNER_ROLE : "STAFF");
+
 export const requireAdmin = (roles?: string[]) => async (req: Request, _res: Response, next: NextFunction) => {
   try {
     const a = readActor(req);
@@ -48,7 +60,7 @@ export const requireMember = async (req: Request, _res: Response, next: NextFunc
  * introduction. Until our team has approved the bio data a member only has
  * their own account — they can edit their profile, add photos and read their
  * updates, and nothing else. Their profile is equally invisible to others,
- * which `matchesFor` already handles by only ever listing APPROVED members.
+ * which the feed queries already handle by only ever listing APPROVED members.
  *
  * Use after requireMember, which has put the member's status on `actor.role`.
  */

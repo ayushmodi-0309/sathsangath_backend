@@ -1,15 +1,66 @@
+import { Prisma } from "@prisma/client";
 import type { Member, MemberTag, TagValue, TagCategory, Photo, MembershipPlan } from "@prisma/client";
 import { ageFrom, list } from "./util";
 import { resolveUrl } from "./storage";
 
-function activePlan(plans: MembershipPlan[]): MembershipPlan | null {
+const photoOrder = [{ isMain: "desc" as const }, { createdAt: "asc" as const }];
+
+/**
+ * EGRESS: the columns toPublicProfile() actually reads, and nothing else.
+ *
+ * Every member-facing query selects one of the two shapes below instead of
+ * fetching whole Member rows. A whole row is ~60 columns and carries
+ * passwordHash, the ID proof and original document keys, the fcmToken, admin
+ * notes, horoscope data, contact details and all 13 partner-preference columns
+ * — none of which any member-facing serializer reads. Neither shape joins
+ * `tags` or `membershipPlans`: only toAdminMember() reads tags and only
+ * toSelf()/toAdminMember() read plans, so joining them for a feed meant three
+ * extra tables per candidate for data that was then thrown away.
+ *
+ * `approvedAt` is here for the feed's "just joined" filter, not for output.
+ */
+const publicFields = {
+  id: true, profileCode: true, gender: true, dob: true, heightCm: true, weightKg: true,
+  maritalStatus: true, community: true, subCommunity: true, city: true, state: true,
+  education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
+  siblings: true, familyBackground: true, about: true, photoUrl: true, motherTongue: true,
+  familyType: true, nativePlace: true, country: true, visaType: true, approvedAt: true,
+} satisfies Prisma.MemberSelect;
+
+/**
+ * Feed rows. Only the main photo is fetched: a non-mutual viewer is shown
+ * exactly one photo (see mainOnly), so the other five were pure egress.
+ */
+export const publicSelect = {
+  ...publicFields,
+  photos: { orderBy: photoOrder, take: 1 },
+} satisfies Prisma.MemberSelect;
+
+/**
+ * One profile opened on its own, and the Interests/Suggestions lists, where a
+ * row may be serialized either way depending on whether the two members have
+ * liked each other. Superset of publicSelect, so toPublicProfile() takes it too.
+ */
+export const mutualSelect = {
+  ...publicFields,
+  photos: { orderBy: photoOrder },
+  fullName: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
+  income: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
+  prefRelocate: true, prefCommunities: true, prefCities: true, prefEducation: true,
+  prefOccupation: true, prefCountries: true, prefIncomeMin: true, prefNotes: true,
+} satisfies Prisma.MemberSelect;
+
+export type PublicMember = Prisma.MemberGetPayload<{ select: typeof publicSelect }>;
+export type MutualMember = Prisma.MemberGetPayload<{ select: typeof mutualSelect }>;
+
+function activePlan<T extends { startDate: Date; endDate: Date | null }>(plans: T[]): T | null {
   const now = new Date();
   return plans
     .filter((p) => p.startDate <= now && (p.endDate === null || p.endDate >= now))
     .sort((a, b) => b.startDate.getTime() - a.startDate.getTime())[0] ?? null;
 }
 
-type FullMember = Member & { tags?: (MemberTag & { tagValue: TagValue & { category: TagCategory } })[]; photos?: Photo[]; membershipPlans?: MembershipPlan[] };
+type FullMember = Member & { tags?: (MemberTag & { tagValue: TagValue & { category: TagCategory } })[]; photos: Photo[]; membershipPlans?: MembershipPlan[] };
 const mainOnly = (ps: Photo[]) => { const main = ps.find((p) => p.isMain) ?? ps[0]; return main ? [main] : []; };
 /**
  * Exactly one photo goes out as the main one, whatever the rows say.
@@ -19,8 +70,8 @@ const mainOnly = (ps: Photo[]) => { const main = ps.find((p) => p.isMain) ?? ps[
  * the first main photo, or the first photo when none is marked. Queries order
  * photos by isMain and then oldest first, so that is the longest-standing one.
  */
-const toPhotos = (m: FullMember) => {
-  const ps = m.photos ?? [];
+const toPhotos = (m: { photos: Photo[] }) => {
+  const ps = m.photos;
   const mainId = (ps.find((p) => p.isMain) ?? ps[0])?.id;
   return Promise.all(ps.map(async (p) => ({ id: p.id, url: (await resolveUrl(p.url))!, isMain: p.id === mainId })));
 };
@@ -35,7 +86,7 @@ const toPhotos = (m: FullMember) => {
  * birthTime and birthPlace are horoscope data and are admin-only: they appear in
  * toAdminMember and in no member-facing shape, not even toSelf. Do not add them here.
  */
-export async function toPublicProfile(m: FullMember, allPhotos = false) {
+export async function toPublicProfile(m: PublicMember, allPhotos = false) {
   return {
     id: m.id,
     profileCode: m.profileCode,
@@ -68,7 +119,7 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
     country: m.country,
     visaType: m.visaType,
     // Other members see only the main photo until both have liked each other.
-    photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos ?? []) }),
+    photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos) }),
   };
 }
 
@@ -78,7 +129,7 @@ export async function toPublicProfile(m: FullMember, allPhotos = false) {
  * see toPublicProfile.)
  * Phone, email and family contacts still stay private: only the admin shares those.
  */
-export const toMutualProfile = async (m: FullMember) => ({
+export const toMutualProfile = async (m: MutualMember) => ({
   ...(await toPublicProfile(m, true)), fullName: m.fullName, mutual: true,
   dob: m.dob, dobIsApproximate: m.dobIsApproximate,
   religion: m.religion,
@@ -127,6 +178,37 @@ export async function toSelf(m: FullMember) {
       notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
     },
     currentPlan: ap ? { plan: ap.plan, endDate: ap.endDate } : null,
+  };
+}
+
+/**
+ * EGRESS: one row of the admin member list — the thirteen fields that list
+ * renders, and nothing else.
+ *
+ * The list used to fetch whole Member rows with the tag, photo and plan joins
+ * (~60 columns and three extra tables per row) to show a name, a code, a
+ * status, a place and a plan badge. A member's own page still gets the whole
+ * record through toAdminMember(), which is where the tags are read.
+ */
+export const adminListSelect = {
+  id: true, profileCode: true, fullName: true, phone: true, email: true, gender: true, dob: true,
+  status: true, city: true, community: true, education: true, profession: true, createdAt: true, source: true,
+  membershipPlans: {
+    select: { id: true, plan: true, startDate: true, endDate: true, note: true },
+    orderBy: { startDate: "desc" as const },
+  },
+} satisfies Prisma.MemberSelect;
+
+type AdminListMember = Prisma.MemberGetPayload<{ select: typeof adminListSelect }>;
+
+/** `dob` becomes an age and the plans collapse to the one running today; neither goes out as it was fetched. */
+export function toAdminListItem(m: AdminListMember) {
+  const { dob, membershipPlans, ...rest } = m;
+  const ap = activePlan(membershipPlans);
+  return {
+    ...rest,
+    age: ageFrom(dob),
+    currentPlan: ap ? { id: ap.id, plan: ap.plan, startDate: ap.startDate, endDate: ap.endDate, note: ap.note } : null,
   };
 }
 
