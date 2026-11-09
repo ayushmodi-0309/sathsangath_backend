@@ -287,6 +287,10 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
     ageMin: num, ageMax: num, heightMin: num, heightMax: num,
     city: csv, maritalStatus: csv, education: csv, profession: csv, diet: csv, community: csv,
     subCommunity: csv, state: csv, motherTongue: csv, familyType: csv, nativePlace: csv,
+    country: csv,
+    // One band from the income ladder; lib/matching.ts reads it as "that band or higher"
+    // and ignores anything not on the ladder.
+    incomeMin: z.string().trim().max(40).optional(),
     hasPhoto: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     justJoined: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     nearby: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),

@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { ageFrom } from "./util";
 import { mutualSelect, publicSelect, type MutualMember, type PublicMember } from "./serializers";
+import { DIETS, INCOME_RANGES, incomeAtLeast } from "./choices";
+import { ALL_COUNTRIES } from "./countries-data";
 
 /** Member + tags + photos + plans: the whole record, for the admin portal and a member's own account. */
 export const includeTags = {
@@ -25,6 +27,10 @@ export type FeedFilters = {
   ageMin?: number; ageMax?: number; heightMin?: number; heightMax?: number;
   city?: string[]; maritalStatus?: string[]; education?: string[]; profession?: string[]; diet?: string[]; community?: string[];
   subCommunity?: string[]; state?: string[]; motherTongue?: string[]; familyType?: string[]; nativePlace?: string[];
+  /** ISO codes of the countries they live in, e.g. ["IN", "US"]. */
+  country?: string[];
+  /** One band from INCOME_RANGES: matches that band and every band above it. */
+  incomeMin?: string;
   hasPhoto?: boolean;
   /** Approved within the last 14 days. */
   justJoined?: boolean;
@@ -34,14 +40,27 @@ export type FeedFilters = {
   code?: string;
   sort?: "new" | "ageAsc" | "ageDesc" | "heightDesc" | "heightAsc";
 };
-// NOTE: income is deliberately not filterable. It is only revealed after a mutual like, and filtering on it would leak it.
+/*
+ * INCOME. A member's own income band stays mutual-only on the profile itself
+ * (see toMutualProfile), but the feed can be narrowed by `incomeMin`, the way
+ * the admin members list can and the way a partner preference reads: "at least
+ * this much". This is a deliberate reversal of the older rule that income was
+ * not filterable at all.
+ *
+ * It is a known trade-off, not an oversight: a filter is an oracle, so a
+ * determined viewer can bracket a profile's band by moving `incomeMin` and
+ * watching the profile appear and disappear. Only the band is exposed this
+ * way, never the figure, and only for profiles already in the viewer's feed.
+ * There is deliberately no `incomeMax`, which would make bracketing a single
+ * request instead of several.
+ */
 
 /** The text columns a member can filter the feed on. */
 type TextFilterField = "city" | "maritalStatus" | "education" | "profession" | "diet" | "community"
-  | "subCommunity" | "state" | "motherTongue" | "familyType" | "nativePlace";
+  | "subCommunity" | "state" | "motherTongue" | "familyType" | "nativePlace" | "country";
 
 const TEXT_FILTER_FIELDS = ["city", "maritalStatus", "education", "profession", "diet", "community",
-  "subCommunity", "state", "motherTongue", "familyType", "nativePlace"] as const satisfies readonly TextFilterField[];
+  "subCommunity", "state", "motherTongue", "familyType", "nativePlace", "country"] as const satisfies readonly TextFilterField[];
 
 /** A profile as the browse feed serves it. */
 export type Candidate = PublicMember;
@@ -127,6 +146,11 @@ function filterConditions(f: FeedFilters, viewerCity: string | null): Prisma.Mem
   // A null height fails a range test in SQL just as it did in the old comparison.
   if (f.heightMin !== undefined) and.push({ heightCm: { gte: f.heightMin } });
   if (f.heightMax !== undefined) and.push({ heightCm: { lte: f.heightMax } });
+  // "At least this band": the ladder is ordered, so this is a set membership test
+  // rather than a string comparison. An unrecognised band is ignored, exactly as
+  // an unrecognised text value is.
+  const bands = incomeAtLeast(f.incomeMin);
+  if (bands) and.push({ income: { in: bands } });
   for (const field of TEXT_FILTER_FIELDS) {
     const w = textIn(field, f[field]);
     if (w) and.push(w);
@@ -196,6 +220,31 @@ export async function suggestionsFor(viewerId: string) {
 }
 
 /**
+ * Diet is the one list offered in full rather than feed-first. The six choices
+ * are the same everywhere a diet is entered or filtered — the intake forms, the
+ * admin members list and now both member clients — and a member reads a missing
+ * choice as the app being broken rather than as "nobody in your feed eats that".
+ * A choice that matches nothing simply returns an empty page.
+ *
+ * Values already stored that are not one of the six (older imports) are kept at
+ * the end, so a profile saved as "Veg" stays reachable.
+ */
+function dietChoices(inFeed: string[]): string[] {
+  const canonical = new Set<string>(DIETS.map((d) => d.toLowerCase()));
+  return [...DIETS, ...inFeed.filter((d) => !canonical.has(d.toLowerCase()))];
+}
+
+const COUNTRY_NAME = new Map(ALL_COUNTRIES.map(([code, name]) => [code, name]));
+
+/**
+ * Country codes ordered by the name the clients show, not by the code, so the
+ * list does not read as alphabetised-by-accident. Unlike diet this one stays
+ * feed-first: offering all 250 countries when the feed holds three is noise.
+ */
+const byCountryName = (codes: string[]) =>
+  [...codes].sort((a, b) => (COUNTRY_NAME.get(a) ?? a).localeCompare(COUNTRY_NAME.get(b) ?? b));
+
+/**
  * Distinct values (and age/height ranges) present in the viewer's own feed, so the app only offers filters that can match.
  *
  * EGRESS: aggregates, so Postgres does the work and sends back only the
@@ -219,16 +268,24 @@ export async function filterOptionsFor(viewerId: string) {
     prisma.member.count({ where }),
     prisma.member.count({ where: { AND: [...conditions, HAS_PHOTO] } }),
   ]);
-  const [cities, maritalStatuses, educations, professions, diets, communities,
-    subCommunities, states, motherTongues, familyTypes, nativePlaces] = texts;
+  const [cities, maritalStatuses, educations, professions, feedDiets, communities,
+    subCommunities, states, motherTongues, familyTypes, nativePlaces, countries] = texts;
 
   return {
     // ageFrom() inverts dob: the earliest date of birth in the feed is the eldest member.
     ageMin: range._max.dob ? ageFrom(range._max.dob) : null,
     ageMax: range._min.dob ? ageFrom(range._min.dob) : null,
     heightMin: range._min.heightCm, heightMax: range._max.heightCm,
-    cities, maritalStatuses, educations, professions, diets, communities,
+    cities, maritalStatuses, educations, professions, diets: dietChoices(feedDiets), communities,
     subCommunities, states, motherTongues, familyTypes, nativePlaces,
+    countries: byCountryName(countries),
+    // The name for each code above. Sent rather than looked up client-side
+    // because the mobile app carries only the handful of countries whose phone
+    // rules it needs, and would otherwise show a bare "DE".
+    countryNames: Object.fromEntries(countries.map((c) => [c, COUNTRY_NAME.get(c) ?? c])),
+    // The ordered income ladder, so a client need not hardcode it to offer the
+    // "minimum income" filter. Not feed-derived: it is a threshold, not a set.
+    incomeRanges: [...INCOME_RANGES],
     withPhoto, total,
   };
 }

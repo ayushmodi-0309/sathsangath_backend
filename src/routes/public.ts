@@ -11,6 +11,11 @@ import { removeObject, saveUpload } from "../lib/storage";
 import { checkPhone, isCountry, type CountryCode } from "../lib/phone";
 import { searchCities, verifyCity } from "../lib/cities";
 import { sendSubmissionReceived } from "../lib/notify";
+import { DIETS, INCOME_RANGES } from "../lib/choices";
+
+// Shared with lib/matching.ts (the feed filters); defined in lib/choices.ts and re-exported here
+// so the long-standing `from "./public"` imports keep working.
+export { DIETS, INCOME_RANGES };
 
 export const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
@@ -46,10 +51,8 @@ const NO_EXPIRY_VISA = "Citizen";
  * They are enumerated here too so the API, not the form, is what rejects a value off the list.
  */
 export const MARITAL_STATUSES = ["Never married", "Divorced", "Widowed", "Awaiting divorce"] as const;
-export const DIETS = ["Vegetarian", "Jain vegetarian", "Eggetarian", "Non-vegetarian", "Vegan", "veg. + non-veg."] as const;
 export const FAMILY_TYPES = ["Joint family", "Nuclear family"] as const;
 export const RELOCATE = ["Yes", "Maybe", "No"] as const;
-export const INCOME_RANGES = ["\u20b91\u20133 lakh", "\u20b93\u20135 lakh", "\u20b95\u20137 lakh", "\u20b97\u201310 lakh", "\u20b910\u201315 lakh", "\u20b915\u201320 lakh", "\u20b920\u201330 lakh", "\u20b930\u201350 lakh", "\u20b950 lakh\u20131 crore", "\u20b91 crore+"] as const;
 /** An optional field whose value must come from a fixed list; "" is treated as "not given". */
 const oneOfList = <T extends readonly [string, ...string[]]>(vals: T, msg: string) =>
   z.string().trim().pipe(z.enum(vals, { message: msg })).optional().or(z.literal("").transform(() => undefined));
