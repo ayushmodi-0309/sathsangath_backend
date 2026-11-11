@@ -12,7 +12,7 @@ import { checkAnyPhone, isCountry } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { photoUpload, VISA_TYPES, weightKgField } from "./public";
+import { ID_PROOF_TYPES, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
 
@@ -47,12 +47,24 @@ memberRouter.patch("/fcm-token", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/**
+ * Every change a member makes to their own bio data comes with the same confirmation they gave when they
+ * registered: they accept the privacy policy and take responsibility for what they upload.
+ */
+function requireConsent(body: { consent?: unknown }) {
+  if (body.consent !== true && body.consent !== "true") {
+    throw new HttpError(422, "Please tick the confirmation box to save your changes.", { fields: { consent: "Please tick the box to confirm" } });
+  }
+}
+
 // Only contact details are editable by the member. Bio data changes go through the admin.
 memberRouter.patch("/me", wrap(async (req, res) => {
+  requireConsent(req.body);
   const d = z.object({
     phone: z.string().transform((v, ctx) => { const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
     email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => null)),
-    familyPhone: z.string().transform((v, ctx) => { const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
+    // A blank family number clears it; anything else must be a valid number.
+    familyPhone: z.string().trim().transform((v, ctx) => { if (!v) return null; const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
     familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => null)),
   }).parse(req.body);
   if (d.phone) {
@@ -64,8 +76,25 @@ memberRouter.patch("/me", wrap(async (req, res) => {
   res.json(await toSelf(m));
 }));
 
+// The member replaces their own ID proof. The old file is deleted once the new one is saved.
+memberRouter.put("/id-proof", upload.single("idproof"), wrap(async (req, res) => {
+  requireConsent(req.body);
+  const file = req.file;
+  if (!file) throw new HttpError(422, "Choose the ID proof file to upload.", { fields: { idProof: "Choose a file" } });
+  const type = String(req.body.idProofType ?? "").trim().toUpperCase();
+  if (!(ID_PROOF_TYPES as readonly string[]).includes(type)) throw new HttpError(422, "Choose the type of ID proof.", { fields: { idProofType: "Choose the type of ID proof" } });
+  const before = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { idProofUrl: true } });
+  const key = await saveUpload("docs", file);
+  await prisma.member.update({ where: { id: me(req) }, data: { idProofUrl: key, idProofType: type } });
+  await removeObject(before.idProofUrl);
+  const m = await loadMe(me(req));
+  await activity(who(m), "UPDATED_ID_PROOF", "Member", m.id, { type });
+  res.json(await toSelf(m));
+}));
+
 // All profile fields except fullName are self-editable. Contact/phone changes still go through PATCH /member/me.
 memberRouter.patch("/profile", wrap(async (req, res) => {
+  requireConsent(req.body);
   const str = z.string().trim().max(2000).optional();
   const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().optional());
   const arr = z.preprocess((v) => {

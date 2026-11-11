@@ -767,13 +767,21 @@ adminRouter.put("/overrides", wrap(async (req, res) => {
 adminRouter.delete("/overrides/:id", wrap(async (req, res) => { await prisma.visibilityOverride.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
 
 // ---------- Likes & introduction requests ----------
+/** Stored photo keys are not browser URLs: swap each listed member's photoUrl for a signed link. */
+async function withPhotos<T extends Record<string, any>>(rows: T[], keys: string[]): Promise<T[]> { // eslint-disable-line @typescript-eslint/no-explicit-any
+  return Promise.all(rows.map(async (r) => {
+    const out: Record<string, any> = { ...r }; // eslint-disable-line @typescript-eslint/no-explicit-any
+    for (const k of keys) if (out[k]) out[k] = { ...out[k], photoUrl: await resolveUrl(out[k].photoUrl) };
+    return out as T;
+  }));
+}
 adminRouter.get("/likes", wrap(async (req, res) => {
   const pg = paging(req, 20, { allowedSorts: ["createdAt"] });
   const [total, rows] = await Promise.all([
     prisma.like.count(),
-    prisma.like.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { liker: { select: { id: true, profileCode: true, fullName: true, phone: true } }, liked: { select: { id: true, profileCode: true, fullName: true, phone: true } } } }),
+    prisma.like.findMany({ orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { liker: { select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } }, liked: { select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } } } }),
   ]);
-  res.json(pg.envelope(total, rows));
+  res.json(pg.envelope(total, await withPhotos(rows, ["liker", "liked"])));
 }));
 adminRouter.get("/introductions", wrap(async (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
@@ -783,10 +791,10 @@ adminRouter.get("/introductions", wrap(async (req, res) => {
     prisma.introRequest.count({ where }),
     prisma.introRequest.findMany({
       where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take,
-      include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } } },
+      include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } } },
     }),
   ]);
-  res.json(pg.envelope(total, rows));
+  res.json(pg.envelope(total, await withPhotos(rows, ["requester", "target"])));
 }));
 adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
   const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);

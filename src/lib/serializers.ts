@@ -167,6 +167,8 @@ export async function toSelf(m: FullMember) {
     // Members who signed up with Google have no password yet; the settings screen offers to create one.
     hasPassword: !!m.passwordHash,
     visaType: m.visaType, visaExpiry: m.visaExpiry,
+    // Whether an ID proof is on file and what kind. The document itself is never sent to a member.
+    hasIdProof: !!m.idProofUrl, idProofType: m.idProofType,
     // What our team asked the member to change. adminNote is also used to record
     // why an account was suspended or restricted, which is internal, so it is
     // only handed over for the statuses where it was written for the member.
