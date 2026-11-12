@@ -5,7 +5,12 @@ export const pair = (a: string, b: string) => (a < b ? { memberAId: a, memberBId
 
 /** Whether our team has approved these two members to see each other's mobile number and email. */
 export async function isContactShared(a: string, b: string) {
-  return !!(await prisma.contactShare.findUnique({ where: { memberAId_memberBId: pair(a, b) }, select: { id: true } }));
+  try {
+    return !!(await prisma.contactShare.findUnique({ where: { memberAId_memberBId: pair(a, b) }, select: { id: true } }));
+  } catch (e) {
+    console.error("contactShare lookup failed (run `prisma db push`?):", (e as Error).message); // never break a profile page over this
+    return false;
+  }
 }
 
 /** Both members have liked each other. */
