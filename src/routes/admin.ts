@@ -768,6 +768,17 @@ adminRouter.put("/overrides", wrap(async (req, res) => {
 adminRouter.delete("/overrides/:id", wrap(async (req, res) => { await prisma.visibilityOverride.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
 
 // ---------- Likes & introduction requests ----------
+/** Pairs (as "a:b") among these members whose contact sharing is approved. Returns none if the table is missing, so lists still load before the database has been updated. */
+async function sharedPairs(ids: string[]) {
+  try {
+    const rows = await prisma.contactShare.findMany({ where: { memberAId: { in: ids }, memberBId: { in: ids } }, select: { memberAId: true, memberBId: true } });
+    return new Set(rows.map((s) => `${s.memberAId}:${s.memberBId}`));
+  } catch (e) {
+    console.error("contactShare lookup failed (run `prisma db push`?):", (e as Error).message);
+    return new Set<string>();
+  }
+}
+
 /** The membership plan each member is on today (key), so lists can show who holds which package. */
 async function planMap(memberIds: string[]) {
   const now = new Date();
@@ -810,7 +821,12 @@ adminRouter.get("/introductions", wrap(async (req, res) => {
     }),
   ]);
   const newCount = await prisma.introRequest.count({ where: { status: "NEW" } });
-  res.json({ ...pg.envelope(total, await withPhotos(rows, ["requester", "target"])), newCount });
+  const shared = await sharedPairs(rows.flatMap((r) => [r.requesterId, r.targetId]));
+  const items = (await withPhotos(rows, ["requester", "target"])).map((r) => {
+    const k = pair(r.requesterId, r.targetId);
+    return { ...r, contactShared: shared.has(`${k.memberAId}:${k.memberBId}`) };
+  });
+  res.json({ ...pg.envelope(total, items), newCount });
 }));
 adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
   const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);
@@ -866,8 +882,7 @@ adminRouter.get("/notifications", wrap(async (req, res) => {
   const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
   const byId = new Map(await Promise.all(people.map(async (p) => [p.id, { ...p, photoUrl: await resolveUrl(p.photoUrl) }] as const)));
   const plans = await planMap(ids);
-  const shares = await prisma.contactShare.findMany({ where: { memberAId: { in: ids }, memberBId: { in: ids } }, select: { memberAId: true, memberBId: true } });
-  const shared = new Set(shares.map((s) => `${s.memberAId}:${s.memberBId}`));
+  const shared = await sharedPairs(ids);
   res.json(pg.envelope(total, rows.map((n) => {
     let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {}
     const k = d.a && d.b ? pair(d.a, d.b) : null;
