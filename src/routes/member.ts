@@ -8,13 +8,14 @@ import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, vis
 import { mutualSelect, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { activity, list, memberLabel } from "../lib/util";
-import { checkAnyPhone, isCountry } from "../lib/phone";
+import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
 import { ID_PROOF_TYPES, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
+import { isContactShared } from "../lib/contact-share";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
@@ -390,8 +391,11 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   // an email, so there is no branch for it.
   const revealFull = isMutual || isSelf;
   const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
+  // Mobile number and email only after our team approves this pair (admin: Likes & requests, Mutual likes).
+  const contactApproved = isMutual && !isSelf && (await isContactShared(viewerId, p.id));
   res.json({
     ...serialized,
+    ...(isMutual && !isSelf ? { contactApproved, contact: contactApproved ? { phone: isPlaceholderPhone(p.phone) ? null : p.phone, email: p.email } : null } : {}),
     liked: isSelf ? false : !!like,
     mutual: isMutual,
     suggested: isSelf ? false : !!sug,
