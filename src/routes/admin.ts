@@ -10,7 +10,7 @@ import { includeTags } from "../lib/matching";
 import { adminListSelect, toAdminListItem, toAdminMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { audit, tempPassword } from "../lib/util";
-import { areMutual, pair } from "../lib/contact-share";
+import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
@@ -898,7 +898,14 @@ adminRouter.post("/mutual/share-contact", wrap(async (req, res) => {
   if (!(await areMutual(a, b))) throw new HttpError(422, "These two members have not liked each other.");
   const [ma, mb] = await Promise.all([prisma.member.findUniqueOrThrow({ where: { id: a } }), prisma.member.findUniqueOrThrow({ where: { id: b } })]);
   const k = pair(a, b);
-  await prisma.contactShare.upsert({ where: { memberAId_memberBId: k }, create: { ...k, approvedBy: adminId(req) }, update: {} });
+  const save = () => prisma.contactShare.upsert({ where: { memberAId_memberBId: k }, create: { ...k, approvedBy: adminId(req) }, update: {} });
+  try { await save(); }
+  catch (e) {
+    // The database has not been updated with `prisma db push` yet: create the table and try once more.
+    if (!isMissingTable(e)) throw e;
+    await ensureContactShareTable();
+    await save();
+  }
   const first = (n: string) => n.split(" ")[0];
   await prisma.notification.createMany({ data: [
     { audience: "MEMBER", memberId: ma.id, type: "CONTACT_SHARED", title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(mb.fullName)} (${mb.profileCode}). Open their profile to see them.`, data: JSON.stringify({ memberId: mb.id }) },

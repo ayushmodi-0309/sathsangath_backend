@@ -174,9 +174,9 @@ export function receivedEmail(m: M): Email {
 
 export function mutualEmail(m: M, other: { profileCode: string; fullName: string; id: string }): Email {
   return layout({
-    subject: "It's a match! You both liked each other", preheader: `${firstName(other.fullName)} (${other.profileCode}) liked your profile as well.`,
+    subject: "It's a match! You both liked each other", preheader: `${other.profileCode} liked your profile as well.`,
     title: "It's a mutual match", greeting: `Namaste ${firstName(m.fullName)},`, textLines: [],
-    paragraphs: [`Wonderful news. <strong>${esc(firstName(other.fullName))} (${esc(other.profileCode)})</strong> has liked your profile as well. You can now view each other's profile properly.`, "If you would like to take this forward, open the profile and ask us for an introduction. Our team will speak to both families and arrange everything."],
+    paragraphs: [`Wonderful news. <strong>${esc(other.profileCode)}</strong> has liked your profile as well. You can now view each other's profile properly.`, "If you would like to take this forward, open the profile and ask us for an introduction. Our team will speak to both families and arrange everything."],
     cta: { label: "View their profile", url: openUrl(`/member/profile/${other.id}`), webUrl: `${webBase()}/member/profile/${other.id}` },
     note: "Phone numbers and email addresses stay private. Only our team shares contact details, when both families are ready.",
   });

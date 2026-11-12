@@ -18,3 +18,24 @@ export async function areMutual(a: string, b: string) {
   const n = await prisma.like.count({ where: { OR: [{ likerId: a, likedId: b }, { likerId: b, likedId: a }] } });
   return n === 2;
 }
+
+/** Ids of the members this viewer has been approved to see contact details (and names) of. Empty if the table is missing. */
+export async function sharedWith(viewerId: string): Promise<Set<string>> {
+  try {
+    const rows = await prisma.contactShare.findMany({ where: { OR: [{ memberAId: viewerId }, { memberBId: viewerId }] }, select: { memberAId: true, memberBId: true } });
+    return new Set(rows.map((r) => (r.memberAId === viewerId ? r.memberBId : r.memberAId)));
+  } catch (e) {
+    console.error("contactShare lookup failed (run `prisma db push`?):", (e as Error).message);
+    return new Set();
+  }
+}
+
+/** True when a database error means the ContactShare table has not been created yet. */
+export const isMissingTable = (e: unknown) => (e as { code?: string })?.code === "P2021" || /ContactShare.*does not exist|relation .*ContactShare/i.test((e as Error)?.message ?? "");
+
+/** Creates the table if the database has not been updated with `prisma db push` yet. Safe to run more than once. */
+export async function ensureContactShareTable() {
+  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "ContactShare" ("id" TEXT NOT NULL, "memberAId" TEXT NOT NULL, "memberBId" TEXT NOT NULL, "approvedBy" TEXT, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT "ContactShare_pkey" PRIMARY KEY ("id"))`);
+  await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "ContactShare_memberAId_memberBId_key" ON "ContactShare"("memberAId", "memberBId")`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ContactShare_memberBId_idx" ON "ContactShare"("memberBId")`);
+}

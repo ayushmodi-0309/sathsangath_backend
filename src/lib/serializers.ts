@@ -124,13 +124,13 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
 }
 
 /**
- * After BOTH members have liked each other the other side also sees the full name,
+ * After BOTH members have liked each other the other side also sees the
  * date of birth, religion, parents' names and income. (Country is public —
  * see toPublicProfile.)
  * Phone, email and family contacts still stay private: only the admin shares those.
  */
 export const toMutualProfile = async (m: MutualMember) => ({
-  ...(await toPublicProfile(m, true)), fullName: m.fullName, mutual: true,
+  ...(await toPublicProfile(m, true)), mutual: true, // the name is added only once our team approves sharing (see member.ts)
   dob: m.dob, dobIsApproximate: m.dobIsApproximate,
   religion: m.religion,
   fatherName: m.fatherName,
