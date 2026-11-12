@@ -10,6 +10,7 @@ import { includeTags } from "../lib/matching";
 import { adminListSelect, toAdminListItem, toAdminMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { audit, tempPassword } from "../lib/util";
+import { areMutual, pair } from "../lib/contact-share";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
@@ -767,11 +768,25 @@ adminRouter.put("/overrides", wrap(async (req, res) => {
 adminRouter.delete("/overrides/:id", wrap(async (req, res) => { await prisma.visibilityOverride.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
 
 // ---------- Likes & introduction requests ----------
-/** Stored photo keys are not browser URLs: swap each listed member's photoUrl for a signed link. */
+/** The membership plan each member is on today (key), so lists can show who holds which package. */
+async function planMap(memberIds: string[]) {
+  const now = new Date();
+  const rows = await prisma.membershipPlan.findMany({
+    where: { memberId: { in: memberIds }, startDate: { lte: now }, OR: [{ endDate: null }, { endDate: { gte: now } }] },
+    orderBy: { startDate: "desc" }, select: { memberId: true, plan: true },
+  });
+  const m = new Map<string, string>();
+  for (const r of rows) if (!m.has(r.memberId)) m.set(r.memberId, r.plan);
+  return m;
+}
+
+/** Stored photo keys are not browser URLs: swap each listed member's photoUrl for a signed link, and add their current plan. */
 async function withPhotos<T extends Record<string, any>>(rows: T[], keys: string[]): Promise<T[]> { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const ids = rows.flatMap((r) => keys.map((k) => r[k]?.id as string | undefined)).filter((x): x is string => !!x);
+  const plans = await planMap([...new Set(ids)]);
   return Promise.all(rows.map(async (r) => {
     const out: Record<string, any> = { ...r }; // eslint-disable-line @typescript-eslint/no-explicit-any
-    for (const k of keys) if (out[k]) out[k] = { ...out[k], photoUrl: await resolveUrl(out[k].photoUrl) };
+    for (const k of keys) if (out[k]) out[k] = { ...out[k], photoUrl: await resolveUrl(out[k].photoUrl), plan: plans.get(out[k].id) ?? null };
     return out as T;
   }));
 }
@@ -794,7 +809,8 @@ adminRouter.get("/introductions", wrap(async (req, res) => {
       include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } } },
     }),
   ]);
-  res.json(pg.envelope(total, await withPhotos(rows, ["requester", "target"])));
+  const newCount = await prisma.introRequest.count({ where: { status: "NEW" } });
+  res.json({ ...pg.envelope(total, await withPhotos(rows, ["requester", "target"])), newCount });
 }));
 adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
   const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);
@@ -849,7 +865,42 @@ adminRouter.get("/notifications", wrap(async (req, res) => {
   const ids = [...new Set(rows.flatMap((n) => { try { const d = JSON.parse(n.data ?? "{}"); return [d.a, d.b]; } catch { return []; } }).filter(Boolean))] as string[];
   const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
   const byId = new Map(await Promise.all(people.map(async (p) => [p.id, { ...p, photoUrl: await resolveUrl(p.photoUrl) }] as const)));
-  res.json(pg.envelope(total, rows.map((n) => { let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {} return { ...n, a: byId.get(d.a ?? "") ?? null, b: byId.get(d.b ?? "") ?? null }; })));
+  const plans = await planMap(ids);
+  const shares = await prisma.contactShare.findMany({ where: { memberAId: { in: ids }, memberBId: { in: ids } }, select: { memberAId: true, memberBId: true } });
+  const shared = new Set(shares.map((s) => `${s.memberAId}:${s.memberBId}`));
+  res.json(pg.envelope(total, rows.map((n) => {
+    let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {}
+    const k = d.a && d.b ? pair(d.a, d.b) : null;
+    const pa = byId.get(d.a ?? ""), pb = byId.get(d.b ?? "");
+    return { ...n, a: pa ? { ...pa, plan: plans.get(pa.id) ?? null } : null, b: pb ? { ...pb, plan: plans.get(pb.id) ?? null } : null, contactShared: !!k && shared.has(`${k.memberAId}:${k.memberBId}`) };
+  })));
+}));
+// Two members who liked each other see each other's profile, but not the mobile number or email, until our team approves it here.
+const sharePair = z.object({ a: z.string().min(1), b: z.string().min(1) });
+adminRouter.post("/mutual/share-contact", wrap(async (req, res) => {
+  const { a, b } = sharePair.parse(req.body);
+  if (a === b) throw new HttpError(422, "Choose two different members.");
+  if (!(await areMutual(a, b))) throw new HttpError(422, "These two members have not liked each other.");
+  const [ma, mb] = await Promise.all([prisma.member.findUniqueOrThrow({ where: { id: a } }), prisma.member.findUniqueOrThrow({ where: { id: b } })]);
+  const k = pair(a, b);
+  await prisma.contactShare.upsert({ where: { memberAId_memberBId: k }, create: { ...k, approvedBy: adminId(req) }, update: {} });
+  const first = (n: string) => n.split(" ")[0];
+  await prisma.notification.createMany({ data: [
+    { audience: "MEMBER", memberId: ma.id, type: "CONTACT_SHARED", title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(mb.fullName)} (${mb.profileCode}). Open their profile to see them.`, data: JSON.stringify({ memberId: mb.id }) },
+    { audience: "MEMBER", memberId: mb.id, type: "CONTACT_SHARED", title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(ma.fullName)} (${ma.profileCode}). Open their profile to see them.`, data: JSON.stringify({ memberId: ma.id }) },
+  ] });
+  await Promise.all([
+    sendPush(ma.fcmToken, "Contact details shared", `You can now see ${first(mb.fullName)}'s contact details.`, { type: "CONTACT_SHARED", memberId: mb.id }),
+    sendPush(mb.fcmToken, "Contact details shared", `You can now see ${first(ma.fullName)}'s contact details.`, { type: "CONTACT_SHARED", memberId: ma.id }),
+  ]);
+  await audit(adminId(req), "APPROVE_CONTACT_SHARE", "Member", a, { with: b });
+  res.json({ ok: true });
+}));
+adminRouter.post("/mutual/unshare-contact", wrap(async (req, res) => {
+  const { a, b } = sharePair.parse(req.body);
+  await prisma.contactShare.deleteMany({ where: pair(a, b) });
+  await audit(adminId(req), "REVOKE_CONTACT_SHARE", "Member", a, { with: b });
+  res.json({ ok: true });
 }));
 adminRouter.post("/notifications/read-all", wrap(async (_req, res) => { await prisma.notification.updateMany({ where: { audience: "ADMIN", read: false }, data: { read: true } }); res.json({ ok: true }); }));
 adminRouter.patch("/notifications/:id", wrap(async (req, res) => { await prisma.notification.update({ where: { id: pid(req.params.id) }, data: { read: true } }); res.json({ ok: true }); }));

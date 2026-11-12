@@ -90,7 +90,7 @@ function layout(o: { subject: string; preheader: string; title: string; greeting
           &nbsp;&middot;&nbsp; <a href="mailto:${esc(config.brand.supportEmail)}" style="color:#FFFFFF;text-decoration:none;">${esc(config.brand.supportEmail)}</a>
           &nbsp;&middot;&nbsp; <a href="${esc(config.brand.whatsapp)}" style="color:${C.sand};text-decoration:none;font-weight:700;">WhatsApp us</a>
         </div>
-        <div style="font-family:${SANS};font-size:11px;line-height:18px;color:#B7C0CC;margin-top:14px;">Your name and contact details are never shown to other members.<br>You are receiving this email because of your Sathsangath bio data.</div>
+        <div style="font-family:${SANS};font-size:11px;line-height:18px;color:#B7C0CC;margin-top:14px;">Your contact details are shared only after both members show interest and our team approves.<br>You are receiving this email because of your Sathsangath bio data.</div>
       </td></tr></table>
       <div style="text-align:center;font-family:${SANS};font-size:11px;color:${C.muted};padding:14px 0 4px;">&copy; ${new Date().getFullYear()} Sathsangath Matrimonial Services &middot; <a href="${esc(webBase())}" style="color:${C.muted};">www.sathsangath.in</a></div>
     </td></tr>

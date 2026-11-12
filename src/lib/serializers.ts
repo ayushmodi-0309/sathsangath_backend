@@ -44,7 +44,7 @@ export const publicSelect = {
 export const mutualSelect = {
   ...publicFields,
   photos: { orderBy: photoOrder },
-  fullName: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
+  fullName: true, phone: true, email: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
   income: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
   prefRelocate: true, prefCommunities: true, prefCities: true, prefEducation: true,
   prefOccupation: true, prefCountries: true, prefIncomeMin: true, prefNotes: true,

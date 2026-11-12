@@ -187,6 +187,18 @@ model Like {
   @@unique([likerId, likedId])
 }
 
+/// Admin approval for two members who liked each other to see each other's mobile number and email.
+/// The pair is stored once, with memberAId < memberBId (see lib/contact-share.ts).
+model ContactShare {
+  id         String   @id @default(cuid())
+  memberAId  String
+  memberBId  String
+  approvedBy String?
+  createdAt  DateTime @default(now())
+  @@unique([memberAId, memberBId])
+  @@index([memberBId])
+}
+
 model IntroRequest {
   id          String   @id @default(cuid())
   requesterId String

@@ -33,7 +33,7 @@ export const config = {
   brand: {
     name: "Sathsangath",
     tagline: "Connecting People. Respecting Values.",
-    supportEmail: process.env.SUPPORT_EMAIL ?? "support@sathsangath.in",
+    supportEmail: process.env.SUPPORT_EMAIL ?? "sathsangath888@gmail.com",
     supportPhone: process.env.SUPPORT_PHONE ?? "+91 70160 40925",
     whatsapp: process.env.SUPPORT_WHATSAPP ?? "https://wa.me/917016040925",
     playStore: "https://play.google.com/store/apps/details?id=com.sathsangath.app&hl=en_IN",
