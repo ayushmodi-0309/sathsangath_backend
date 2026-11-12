@@ -5,7 +5,7 @@ import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
 import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, visibleProfile } from "../lib/matching";
-import { mutualSelect, toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
+import { mutualSelect, toMutualProfile, toPublicProfile, toSelf, type MutualMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
@@ -15,7 +15,7 @@ import { sendPush } from "../lib/fcm";
 import { ID_PROOF_TYPES, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
-import { isContactShared } from "../lib/contact-share";
+import { isContactShared, sharedWith } from "../lib/contact-share";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
@@ -36,6 +36,9 @@ const me = (req: { actor?: { id: string } }) => req.actor!.id;
  */
 const notifySelect = { id: true, fullName: true, profileCode: true, phone: true, email: true, fcmToken: true } satisfies Prisma.MemberSelect;
 const loadMe = (id: string) => prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
+/** A mutual-match profile. The name is added only for members whose contact sharing our team has approved. */
+const mutualView = async (m: MutualMember, shared: Set<string>) => ({ ...(await toMutualProfile(m)), ...(shared.has(m.id) ? { fullName: m.fullName } : {}) });
+
 const who = (m: { id: string; profileCode: string; fullName: string }) => ({ type: "MEMBER" as const, memberId: m.id, name: memberLabel(m) });
 
 // ---------- Account ----------
@@ -395,7 +398,7 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   const contactApproved = isMutual && !isSelf && (await isContactShared(viewerId, p.id));
   res.json({
     ...serialized,
-    ...(isMutual && !isSelf ? { contactApproved, contact: contactApproved ? { phone: isPlaceholderPhone(p.phone) ? null : p.phone, email: p.email } : null } : {}),
+    ...(isMutual && !isSelf ? { contactApproved, contact: contactApproved ? { phone: isPlaceholderPhone(p.phone) ? null : p.phone, email: p.email } : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
     liked: isSelf ? false : !!like,
     mutual: isMutual,
     suggested: isSelf ? false : !!sug,
@@ -419,14 +422,13 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
     const back = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: p.id, likedId: me(req) } } });
     if (back) {
       mutual = true;
-      const first = (n: string) => n.split(" ")[0];
       await prisma.$transaction([
         // the person who liked first
         prisma.notification.create({ data: { audience: "MEMBER", memberId: p.id, type: "MUTUAL_LIKE", title: "It's a match! 💞",
-          body: `${first(meRow.fullName)} (${meRow.profileCode}) liked your profile as well. You can now view their profile properly.`, data: JSON.stringify({ memberId: meRow.id }) } }),
+          body: `${meRow.profileCode} liked your profile as well. You can now view their profile properly.`, data: JSON.stringify({ memberId: meRow.id }) } }),
         // the person who just liked
         prisma.notification.create({ data: { audience: "MEMBER", memberId: meRow.id, type: "MUTUAL_LIKE", title: "It's a match! 💞",
-          body: `${first(them.fullName)} (${them.profileCode}) had already liked you. You can now view their profile properly.`, data: JSON.stringify({ memberId: them.id }) } }),
+          body: `${them.profileCode} had already liked you. You can now view their profile properly.`, data: JSON.stringify({ memberId: them.id }) } }),
         // staff bell
         prisma.notification.create({ data: { audience: "ADMIN", type: "MUTUAL_LIKE", title: "Mutual like",
           body: `${memberLabel(meRow)} and ${memberLabel(them)} liked each other.`, data: JSON.stringify({ a: meRow.id, b: them.id }) } }),
@@ -436,8 +438,8 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
       await Promise.all([sendMutualMatch(meRow, them), sendMutualMatch(them, meRow)]);
       // push to both members — must be awaited before res.json() or Vercel kills the fn
       await Promise.allSettled([
-        sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${first(them.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: them.id }),
-        sendPush(them.fcmToken, "You have a new match! 💞", `You and ${first(meRow.fullName)} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id }),
+        sendPush(meRow.fcmToken, "You have a new match! 💞", `You and ${them.profileCode} liked each other.`, { type: "MUTUAL_LIKE", memberId: them.id }),
+        sendPush(them.fcmToken, "You have a new match! 💞", `You and ${meRow.profileCode} liked each other.`, { type: "MUTUAL_LIKE", memberId: meRow.id }),
       ]);
     } else {
       // not mutual yet — notify the liked person
@@ -470,17 +472,19 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
 }));
 
 memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
+  const shared = await sharedWith(me(req));
   const [likes, mutual] = await Promise.all([
     prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
   ]);
   res.json(await Promise.all(likes.map(async (l) => {
     const isMutual = mutual.has(l.likerId);
-    return { ...(await (isMutual ? toMutualProfile(l.liker) : toPublicProfile(l.liker))), liked: isMutual, mutual: isMutual, likedAt: l.createdAt };
+    return { ...(await (isMutual ? mutualView(l.liker, shared) : toPublicProfile(l.liker))), liked: isMutual, mutual: isMutual, likedAt: l.createdAt };
   })));
 }));
 
 memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
+  const shared = await sharedWith(me(req));
   const [likes, mutual, intros, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, select: { likedId: true, createdAt: true, liked: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
@@ -490,12 +494,13 @@ memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
   const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(likes.map(async (l) => {
     const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId);
-    return { ...(await (isMutual ? toMutualProfile(l.liked) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, suggested: suggested.has(l.likedId), likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...(await (isMutual ? mutualView(l.liked, shared) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, suggested: suggested.has(l.likedId), likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
   })));
 }));
 
 /** "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first). */
 memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
+  const shared = await sharedWith(me(req));
   const [rows, likes, mutual, intros] = await Promise.all([
     prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, select: { profileId: true, note: true, createdAt: true, profile: { select: mutualSelect } } }),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
@@ -505,7 +510,7 @@ memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const liked = new Set(likes.map((l) => l.likedId)); const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(rows.map(async (r) => {
     const isMutual = mutual.has(r.profileId); const i = byTarget.get(r.profileId);
-    return { ...(await (isMutual ? toMutualProfile(r.profile) : toPublicProfile(r.profile))), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...(await (isMutual ? mutualView(r.profile, shared) : toPublicProfile(r.profile))), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
   })));
 }));
 
