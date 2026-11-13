@@ -9,13 +9,25 @@ import { prisma } from "./db";
  *
  * Fixed-choice fields (marital status, diet, family type, income band) are deliberately absent:
  * their options are hard-coded in the forms, not admin-managed.
+ *
+ * `education` and `profession` used to be on this list and are not any more. They are now closed,
+ * code-owned lists (the web reads them from `lib/education.ts` and `lib/profession.ts`), so a value
+ * typed into either field must no longer become a new option for everybody else — that is how the
+ * two dropdowns grew to hundreds of near-duplicates ("Dentist", "Physician", "Doctor", …) and made
+ * the feed filters unusable.
+ *
+ * Removing them stops new values being learned. It deliberately does NOT:
+ *   - delete the existing `TagCategory` / `TagValue` rows for Education and Profession, which
+ *     `GET /public/tags` still serves, so the mobile app's dropdowns are unaffected; or
+ *   - reject an off-list value. During the transition the API still accepts and stores whatever
+ *     it is sent, because older app builds let people type freely and must not start failing.
+ *
+ * Validation is tightened, and the existing values mapped, as a later step.
  */
 export const TAG_FIELD_CATEGORIES = {
   community: "Community",
   subCommunity: "Sub-community",
   city: "City",
-  education: "Education",
-  profession: "Profession",
   motherTongue: "Mother tongue",
   birthPlace: "Birth Place",
 } as const;

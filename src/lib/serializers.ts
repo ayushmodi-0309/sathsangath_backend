@@ -24,7 +24,7 @@ const publicFields = {
   maritalStatus: true, community: true, subCommunity: true, city: true, state: true,
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
   siblings: true, familyBackground: true, about: true, photoUrl: true, motherTongue: true,
-  familyType: true, nativePlace: true, country: true, visaType: true, approvedAt: true,
+  familyType: true, nativePlace: true, country: true, visaType: true, visaExpiry: true, approvedAt: true,
 } satisfies Prisma.MemberSelect;
 
 /**
@@ -112,12 +112,13 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     familyType: m.familyType,
     nativePlace: m.nativePlace, // public: members can filter by it
     // Where they live and, if that is outside India, the kind of visa or
-    // status they hold. Both are public: it is the first thing a family asks
-    // and they already filter on country, so withholding it until a mutual
-    // like only made people ask us instead. The expiry date and the document
-    // itself stay private.
+    // status they hold and when it runs out. All three are public: they are
+    // the first thing a family asks and they already filter on country, so
+    // withholding them until a mutual like only made people ask us instead.
+    // The ID document itself is never sent to another member.
     country: m.country,
     visaType: m.visaType,
+    visaExpiry: m.visaExpiry,
     // Other members see only the main photo until both have liked each other.
     photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos) }),
   };
@@ -166,7 +167,6 @@ export async function toSelf(m: FullMember) {
     dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
     // Members who signed up with Google have no password yet; the settings screen offers to create one.
     hasPassword: !!m.passwordHash,
-    visaType: m.visaType, visaExpiry: m.visaExpiry,
     // Whether an ID proof is on file and what kind. The document itself is never sent to a member.
     hasIdProof: !!m.idProofUrl, idProofType: m.idProofType,
     // What our team asked the member to change. adminNote is also used to record

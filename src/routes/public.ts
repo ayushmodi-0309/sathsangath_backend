@@ -45,7 +45,26 @@ export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTH
 
 /** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
 export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "H-1B visa", "Work visa (other)", "Student visa", "Dependent / spouse visa (H-4 etc.)", "Business visa", "Visitor visa", "Other"] as const;
-const NO_EXPIRY_VISA = "Citizen";
+/**
+ * Shorter labels earlier builds of the app and the member profile editor
+ * offered for the same statuses, mapped onto the canonical ones above so a
+ * profile saved by an old client — or stored before this list was shared — is
+ * still accepted and still editable.
+ */
+const VISA_TYPE_ALIASES: Record<string, string> = {
+  "Work visa": "Work visa (other)",
+  "Dependent / spouse visa": "Dependent / spouse visa (H-4 etc.)",
+  "Permanent resident": "Permanent resident (PR / Green card)",
+  "Green card": "Permanent resident (PR / Green card)",
+};
+
+/** The canonical spelling of a status, so one wording is what gets stored. */
+export function normalizeVisaType<T extends string | null | undefined>(v: T): T {
+  if (!v) return v;
+  const t = v.trim();
+  return (VISA_TYPE_ALIASES[t] ?? t) as T;
+}
+
 /**
  * The fixed choices the web forms offer as dropdowns (frontend/lib/geo.ts and the form files).
  * They are enumerated here too so the API, not the form, is what rejects a value off the list.
@@ -165,19 +184,16 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType, visaExpiry, ...rest } = input;
-  // Living outside India: the visa or status and when it expires are required when people register themselves.
-  // Admin entry may leave them empty (the office often does not have them yet).
-  let visaExpiryDate: Date | undefined;
+  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, ...rest } = input;
+  const visaType = normalizeVisaType(rawVisaType);
+  // Living outside India: the visa or status is required when people register themselves. Admin
+  // entry may leave it empty (the office often does not have it yet).
+  //
+  // The expiry date is retired. `visaExpiry` is still destructured off the body above so that an
+  // older mobile build can keep sending it without a validation error, but it is ignored and never
+  // stored. The column and the serialized field stay so existing values keep displaying.
   if (rest.country && rest.country !== "IN") {
     if (source === "WEB" && !visaType) throw new HttpError(422, "Tell us which visa or status you have.", { fields: { visaType: "Choose your visa or status" } });
-    if (visaType && visaType !== NO_EXPIRY_VISA) {
-      const d = visaExpiry ? new Date(visaExpiry) : null;
-      if (d && isNaN(d.getTime())) throw new HttpError(422, "Enter a valid visa expiry date.", { fields: { visaExpiry: "Enter a valid expiry date" } });
-      if (source === "WEB" && !d) throw new HttpError(422, "Tell us when your visa or status expires.", { fields: { visaExpiry: "Enter the date your visa or status expires" } });
-      if (source === "WEB" && d && d.getTime() < Date.now()) throw new HttpError(422, "That visa expiry date has already passed.", { fields: { visaExpiry: "The expiry date must be in the future" } });
-      visaExpiryDate = d ?? undefined;
-    }
   }
   if (!dob) throw new HttpError(422, "Enter a date of birth or age.", { fields: { dob: "Enter a date of birth or age" } });
   const { photoUrls, ...fileFields } = files ?? {};
@@ -185,7 +201,7 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
   const created = await prisma.member.create({
     data: {
       ...rest, dob: new Date(dob), dobIsApproximate: dobIsApproximate ?? false, source, consentGiven: consent,
-      ...(rest.country && rest.country !== "IN" && visaType && { visaType, visaExpiry: visaExpiryDate ?? null }),
+      ...(rest.country && rest.country !== "IN" && visaType && { visaType }),
       profileCode: await nextProfileCode(),
       prefCommunities: (prefCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
       prefEducation: (prefEducation ?? []).join(","), prefOccupation: (prefOccupation ?? []).join(","),

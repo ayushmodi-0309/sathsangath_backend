@@ -12,7 +12,7 @@ import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { ID_PROOF_TYPES, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
+import { ID_PROOF_TYPES, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
 import { isContactShared, sharedWith } from "../lib/contact-share";
@@ -165,28 +165,19 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   if (resolvedState !== undefined) data.state = resolvedState;
 
   // Visa is part of living outside India. India clears it. Anywhere else, the
-  // status is required and only "Citizen" is allowed to have no expiry. The
-  // expiry stays on the member's own account — other members never receive it.
+  // status is required. The expiry date is retired — see the note below.
   const touchingResidence = country !== undefined || visaType !== undefined || visaExpiry !== undefined;
   if (touchingResidence) {
     if (nextCountry === "IN") {
       data.visaType = null;
       data.visaExpiry = null;
     } else {
-      const nextVisa = visaType !== undefined ? visaType : member.visaType;
+      const nextVisa = normalizeVisaType(visaType !== undefined ? visaType : member.visaType);
       if (!nextVisa || !(VISA_TYPES as readonly string[]).includes(nextVisa)) {
         throw new HttpError(422, "Choose your visa or status.", { fields: { visaType: "Choose your visa or status" } });
       }
       data.visaType = nextVisa;
-      if (nextVisa === "Citizen") {
-        data.visaExpiry = null;
-      } else {
-        const raw = visaExpiry !== undefined ? visaExpiry : member.visaExpiry?.toISOString().slice(0, 10) ?? null;
-        const exp = raw ? new Date(raw) : null;
-        if (!exp || isNaN(exp.getTime())) throw new HttpError(422, "Tell us when your visa or status expires.", { fields: { visaExpiry: "Enter the date your visa or status expires" } });
-        if (exp.getTime() < Date.now()) throw new HttpError(422, "That visa expiry date has already passed.", { fields: { visaExpiry: "The expiry date must be in the future" } });
-        data.visaExpiry = exp;
-      }
+      // The expiry date is retired: whatever an older app build sends is accepted and ignored.
     }
   }
   if (dob) data.dob = new Date(dob);
