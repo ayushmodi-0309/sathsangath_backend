@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { ageFrom } from "./util";
 import { mutualSelect, publicSelect, type MutualMember, type PublicMember } from "./serializers";
-import { DIETS, INCOME_RANGES, incomeAtLeast } from "./choices";
+import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, INCOME_RANGES_BY_CURRENCY, incomeAtLeast } from "./choices";
 import { ALL_COUNTRIES } from "./countries-data";
 
 /** Member + tags + photos + plans: the whole record, for the admin portal and a member's own account. */
@@ -29,8 +29,13 @@ export type FeedFilters = {
   subCommunity?: string[]; state?: string[]; motherTongue?: string[]; familyType?: string[]; nativePlace?: string[];
   /** ISO codes of the countries they live in, e.g. ["IN", "US"]. */
   country?: string[];
-  /** One band from INCOME_RANGES: matches that band and every band above it. */
+  /**
+   * One band from that currency's ladder: matches that band and every band above
+   * it, and only profiles who chose the same currency. No conversion.
+   * `incomeCurrency` is ignored unless `incomeMin` is set; omitted means INR.
+   */
   incomeMin?: string;
+  incomeCurrency?: string;
   hasPhoto?: boolean;
   /** Approved within the last 14 days. */
   justJoined?: boolean;
@@ -146,11 +151,15 @@ function filterConditions(f: FeedFilters, viewerCity: string | null): Prisma.Mem
   // A null height fails a range test in SQL just as it did in the old comparison.
   if (f.heightMin !== undefined) and.push({ heightCm: { gte: f.heightMin } });
   if (f.heightMax !== undefined) and.push({ heightCm: { lte: f.heightMax } });
-  // "At least this band": the ladder is ordered, so this is a set membership test
-  // rather than a string comparison. An unrecognised band is ignored, exactly as
-  // an unrecognised text value is.
-  const bands = incomeAtLeast(f.incomeMin);
-  if (bands) and.push({ income: { in: bands } });
+  // "At least this band" inside one currency. The ladder is ordered, so this is a
+  // set membership test rather than a string comparison. An unrecognised pair is
+  // ignored. A currency on its own does not filter, and nothing is converted, so
+  // a dollar minimum never matches a rupee salary.
+  if (f.incomeMin) {
+    const currency = f.incomeCurrency?.trim().toUpperCase() || "INR";
+    const bands = incomeAtLeast(currency, f.incomeMin);
+    if (bands) and.push({ incomeCurrency: currency, income: { in: bands } });
+  }
   for (const field of TEXT_FILTER_FIELDS) {
     const w = textIn(field, f[field]);
     if (w) and.push(w);
@@ -283,9 +292,10 @@ export async function filterOptionsFor(viewerId: string) {
     // because the mobile app carries only the handful of countries whose phone
     // rules it needs, and would otherwise show a bare "DE".
     countryNames: Object.fromEntries(countries.map((c) => [c, COUNTRY_NAME.get(c) ?? c])),
-    // The ordered income ladder, so a client need not hardcode it to offer the
-    // "minimum income" filter. Not feed-derived: it is a threshold, not a set.
+    // The rupee ladder, kept for older clients. incomeRangesByCurrency is the
+    // full set: a minimum is a threshold on one ladder, not a conversion.
     incomeRanges: [...INCOME_RANGES],
+    incomeRangesByCurrency: Object.fromEntries(INCOME_CURRENCIES.map((c) => [c, [...INCOME_RANGES_BY_CURRENCY[c]]])),
     withPhoto, total,
   };
 }

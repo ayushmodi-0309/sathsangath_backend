@@ -14,7 +14,8 @@ import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
-import { createSubmission, DIETS, FAMILY_TYPES, INCOME_RANGES, intakeSchema, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, normalizeVisaType, RELOCATE } from "./public";
+import { checkSiblingCounts, createSubmission, DIETS, FAMILY_TYPES, intakeSchema, manglikClearable, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, normalizeVisaType, RELOCATE } from "./public";
+import { INCOME_CURRENCIES, incomeFieldsPatch, isIncomeCurrency } from "../lib/choices";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
 import { checkAnyPhone, checkPhone, isCountry, type CountryCode } from "../lib/phone";
@@ -55,6 +56,7 @@ const listQuery = z.object({
   education: z.string().optional(),
   profession: z.string().optional(),
   income: z.string().optional(),
+  incomeCurrency: z.string().optional(),
   diet: z.string().optional(),
   state: z.string().optional(),
   country: z.string().optional(),
@@ -70,7 +72,7 @@ const listQuery = z.object({
   hasIdProof: z.enum(["true", "false"]).optional(),
   hasAccount: z.enum(["true", "false"]).optional(),
   expiringSoon: z.enum(["true"]).optional(),
-  plan: z.enum(["FREE", "DIKRI", "DIKRA", "SIGNATURE", "BASIC", "PRO"]).optional(),
+  plan: z.enum(["FREE", "DIKRI", "DIKRA", "DIKRA_6M", "SIGNATURE", "BASIC", "PRO"]).optional(),
   // pagination + sort
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20),
   sort: z.enum(["profileCode","fullName","dob","city","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
@@ -94,6 +96,9 @@ function applyMultiContains(
   }
 }
 
+/** Plan codes a tier filter should match. Anything absent matches only its own code. */
+const PLAN_FILTER_CODES: Record<string, string[]> = { DIKRA: ["DIKRA", "DIKRA_6M"] };
+
 function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   const w: Prisma.MemberWhereInput = {};
   const and: Prisma.MemberWhereInput[] = [];
@@ -113,6 +118,7 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   if (q.heightMax) w.heightCm = { ...(w.heightCm as object), lte: q.heightMax };
   applyMultiContains(w, and, "education", q.education);
   applyMultiContains(w, and, "profession", q.profession);
+  if (q.incomeCurrency && isIncomeCurrency(q.incomeCurrency.trim().toUpperCase())) w.incomeCurrency = q.incomeCurrency.trim().toUpperCase();
   if (q.income)       w.income = { contains: q.income, mode: "insensitive" };
   if (q.diet)         w.diet = q.diet;
   if (q.state)        w.state = { contains: q.state, mode: "insensitive" };
@@ -136,7 +142,11 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   }
   const running = { startDate: { lte: new Date() }, OR: [{ endDate: null }, { endDate: { gte: new Date() } }] }; // started and not ended (no end date = open-ended)
   if (q.plan === "FREE") w.membershipPlans = { none: running };
-  if (q.plan && q.plan !== "FREE") w.membershipPlans = { some: { plan: q.plan, ...running } };
+  if (q.plan && q.plan !== "FREE") {
+    // A filter on a tier covers its duration variants: asking for Dikra Premium members has to
+    // return the 6-month ones too, or they quietly go missing from the tier they belong to.
+    w.membershipPlans = { some: { plan: { in: PLAN_FILTER_CODES[q.plan] ?? [q.plan] }, ...running } };
+  }
   if (and.length) w.AND = and;
   return w;
 }
@@ -303,6 +313,15 @@ const clearableText = z.preprocess((v) => (v === "" ? null : v), z.string().trim
 /** An optional fixed-choice field: one of `vals`, or "" / null to clear it. */
 const clearableChoice = <T extends readonly [string, ...string[]]>(vals: T) =>
   z.preprocess((v) => (v === "" ? null : v), z.union([z.null(), z.enum(vals)]));
+/** A salary band. The currency sent with it decides which ladder it must belong to. */
+const clearableIncome = z.preprocess(
+  (v) => (v === "" ? null : typeof v === "string" ? v.trim() : v),
+  z.union([z.null(), z.string().max(40)]).optional(),
+);
+const optionalCurrency = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim().toUpperCase() : v),
+  z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
+);
 
 const editSchema = z.object({
   fullName: z.string().trim().min(2), phone: z.string().trim(), email: clearableText,
@@ -310,10 +329,16 @@ const editSchema = z.object({
   gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(120, 250),
   maritalStatus: z.string().trim().pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
+  manglik: manglikClearable,
   community: clearableText, subCommunity: clearableText, city: clearableText, state: clearableText,
   education: clearableText, profession: clearableText,
-  income: clearableChoice(INCOME_RANGES), diet: clearableChoice(DIETS),
-  fatherOccupation: clearableText, motherOccupation: clearableText, siblings: clearableText,
+  income: clearableIncome, incomeCurrency: optionalCurrency, diet: clearableChoice(DIETS),
+  fatherOccupation: clearableText, motherOccupation: clearableText,
+  // Four counts, 0-20, clearable. `siblings` is retired and ignored, kept so an older client that
+  // still sends it does not get a validation error.
+  brothers: intEdit(0, 20), brothersMarried: intEdit(0, 20),
+  sisters: intEdit(0, 20), sistersMarried: intEdit(0, 20),
+  siblings: clearableText,
   familyBackground: clearableText, about: clearableText, prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
   prefNotes: clearableText, adminNote: clearableText,
   motherTongue: clearableText, fatherName: clearableText, motherName: clearableText, createdBy: clearableText,
@@ -322,7 +347,7 @@ const editSchema = z.object({
   prefMaritalStatus: clearableChoice(MARITAL_STATUSES), prefRelocate: clearableChoice(RELOCATE),
   prefCommunities: prefList, prefCities: prefList,
   prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
-  prefIncomeMin: clearableChoice(INCOME_RANGES),
+  prefIncomeMin: clearableIncome, prefIncomeCurrency: optionalCurrency,
   visaType: clearableText, visaExpiry: clearableText,
 }).partial().superRefine((v, ctx) => {
   // Same rule the public form enforces: an inverted preferred age range is a mistake.
@@ -341,8 +366,22 @@ const editSchema = z.object({
 const visaExpiryValue = (_v: string | null | undefined): Date | null | undefined => undefined;
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, ...d } = editSchema.parse(req.body);
+  const id = pid(req.params.id);
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = editSchema.parse(req.body);
+  // The office types these in too, so the same rule applies: a married count cannot exceed the
+  // total, and does not stand on its own.
+  const siblingIssues: Record<string, string> = {};
+  checkSiblingCounts(d, (path, message) => { siblingIssues[path] = message; });
+  if (Object.keys(siblingIssues).length) {
+    throw new HttpError(422, Object.values(siblingIssues)[0], { fields: siblingIssues });
+  }
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
+  const existing = await prisma.member.findUniqueOrThrow({
+    where: { id },
+    select: { income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true },
+  });
+  const incomePatch = incomeFieldsPatch({ income, incomeCurrency, prefIncomeMin, prefIncomeCurrency }, existing);
+  if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
   if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
   // This route carries no country field, so the number's own +dialcode decides it (else India).
   for (const field of ["phone", "familyPhone"] as const) {
@@ -353,9 +392,10 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     d[field] = r.value;
   }
   const m = await prisma.member.update({
-    where: { id: pid(req.params.id) },
+    where: { id },
     data: {
       ...d,
+      ...incomePatch.patch,
       ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
       ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
       ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
@@ -397,13 +437,25 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   } else if (body.dob) {
     dobIsApproximate = false;
   }
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, ...d } = fullEditSchema.parse(body);
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = fullEditSchema.parse(body);
+  // The office types these in too, so the same rule applies: a married count cannot exceed the
+  // total, and does not stand on its own.
+  const siblingIssues: Record<string, string> = {};
+  checkSiblingCounts(d, (path, message) => { siblingIssues[path] = message; });
+  if (Object.keys(siblingIssues).length) {
+    throw new HttpError(422, Object.values(siblingIssues)[0], { fields: siblingIssues });
+  }
   void _age;
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
   if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
   // Normalise both numbers before they are written. Falls back to the member's residence country
   // when the form did not say which country the number was typed under.
-  const residence = await prisma.member.findUniqueOrThrow({ where: { id }, select: { country: true } });
+  const residence = await prisma.member.findUniqueOrThrow({
+    where: { id },
+    select: { country: true, income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true },
+  });
+  const incomePatch = incomeFieldsPatch({ income, incomeCurrency, prefIncomeMin, prefIncomeCurrency }, residence);
+  if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
   const home = (isCountry(country) ? country : isCountry(residence.country) ? residence.country : "IN") as CountryCode;
   if (typeof d.phone === "string" && d.phone.trim()) {
     d.phone = normalisedPhone(d.phone, isCountry(phoneCountry) ? phoneCountry : home, "phone");
@@ -429,6 +481,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
       where: { id },
       data: {
         ...d,
+        ...incomePatch.patch,
         ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
         ...(dob !== undefined && { dob: new Date(dob) }),
         ...(dobIsApproximate !== undefined && { dobIsApproximate }),
@@ -654,7 +707,7 @@ adminRouter.get("/members/:id/document", wrap(async (req, res) => {
 
 // ---------- Membership ----------
 const membershipSchema = z.object({
-  plan:      z.enum(["DIKRI", "DIKRA", "SIGNATURE"]),
+  plan:      z.enum(["DIKRI", "DIKRA", "DIKRA_6M", "SIGNATURE"]),
   startDate: z.string().datetime(),
   endDate:   z.string().datetime().optional(), // optional
   note:      z.string().trim().max(300).optional(),

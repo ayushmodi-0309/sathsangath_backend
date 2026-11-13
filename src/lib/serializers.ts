@@ -21,9 +21,10 @@ const photoOrder = [{ isMain: "desc" as const }, { createdAt: "asc" as const }];
  */
 const publicFields = {
   id: true, profileCode: true, gender: true, dob: true, heightCm: true, weightKg: true,
-  maritalStatus: true, community: true, subCommunity: true, city: true, state: true,
+  maritalStatus: true, manglik: true, community: true, subCommunity: true, city: true, state: true,
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
-  siblings: true, familyBackground: true, about: true, photoUrl: true, motherTongue: true,
+  brothers: true, brothersMarried: true, sisters: true, sistersMarried: true,
+  familyBackground: true, about: true, photoUrl: true, motherTongue: true,
   familyType: true, nativePlace: true, country: true, visaType: true, visaExpiry: true, approvedAt: true,
 } satisfies Prisma.MemberSelect;
 
@@ -45,9 +46,9 @@ export const mutualSelect = {
   ...publicFields,
   photos: { orderBy: photoOrder },
   fullName: true, phone: true, email: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
-  income: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
+  income: true, incomeCurrency: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
   prefRelocate: true, prefCommunities: true, prefCities: true, prefEducation: true,
-  prefOccupation: true, prefCountries: true, prefIncomeMin: true, prefNotes: true,
+  prefOccupation: true, prefCountries: true, prefIncomeMin: true, prefIncomeCurrency: true, prefNotes: true,
 } satisfies Prisma.MemberSelect;
 
 export type PublicMember = Prisma.MemberGetPayload<{ select: typeof publicSelect }>;
@@ -85,6 +86,11 @@ const toPhotos = (m: { photos: Photo[] }) => {
  *
  * birthTime and birthPlace are horoscope data and are admin-only: they appear in
  * toAdminMember and in no member-facing shape, not even toSelf. Do not add them here.
+ *
+ * manglik is the deliberate exception. It is derived from a horoscope but it is not raw horoscope
+ * data: families ask it directly and match on it, so it is public like the marital status next to
+ * it — visible to every member, liked or not. The birth time and place it was worked out from stay
+ * admin-only.
  */
 export async function toPublicProfile(m: PublicMember, allPhotos = false) {
   return {
@@ -95,6 +101,7 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     heightCm: m.heightCm,
     weightKg: m.weightKg,
     maritalStatus: m.maritalStatus,
+    manglik: m.manglik,
     community: m.community,
     subCommunity: m.subCommunity,
     city: m.city,
@@ -104,7 +111,11 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     diet: m.diet,
     fatherOccupation: m.fatherOccupation,
     motherOccupation: m.motherOccupation,
-    siblings: m.siblings,
+    brothers: m.brothers,
+    brothersMarried: m.brothersMarried,
+    sisters: m.sisters,
+    sistersMarried: m.sistersMarried,
+    siblingsSummary: siblingsSummary(m),
     familyBackground: m.familyBackground,
     about: m.about,
     photoUrl: await resolveUrl(m.photoUrl),
@@ -137,11 +148,12 @@ export const toMutualProfile = async (m: MutualMember) => ({
   fatherName: m.fatherName,
   motherName: m.motherName,
   income: m.income, // revealed only after a mutual like, and deliberately not filterable
+  incomeCurrency: m.incomeCurrency,
   prefs: {
     ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
     communities: list(m.prefCommunities), cities: list(m.prefCities),
     education: list(m.prefEducation), occupation: list(m.prefOccupation),
-    countries: list(m.prefCountries), incomeMin: m.prefIncomeMin, notes: m.prefNotes,
+    countries: list(m.prefCountries), incomeMin: m.prefIncomeMin, incomeCurrency: m.prefIncomeCurrency, notes: m.prefNotes,
   },
 });
 
@@ -155,13 +167,39 @@ export const toMutualProfile = async (m: MutualMember) => ({
  * if you are looking for it, that was the bug, and it is gone.
  */
 
+/**
+ * "2 brothers (1 married), 3 sisters" — one place where this sentence is built.
+ *
+ * Returned alongside the raw counts so every client prints the same thing: the web panel, the
+ * admin screens and the app would otherwise each grow their own pluralisation. Null when nothing
+ * was answered; "No brothers or sisters" when the answer was explicitly none, which is a real
+ * answer and not the same as silence.
+ */
+export function siblingsSummary(m: {
+  brothers: number | null; brothersMarried: number | null;
+  sisters: number | null; sistersMarried: number | null;
+}): string | null {
+  if (m.brothers == null && m.sisters == null) return null;
+  const part = (n: number | null, married: number | null, one: string, many: string) => {
+    if (n == null) return null;
+    if (n === 0) return null;
+    const noun = n === 1 ? one : many;
+    return married ? `${n} ${noun} (${married} married)` : `${n} ${noun}`;
+  };
+  const parts = [
+    part(m.brothers, m.brothersMarried, "brother", "brothers"),
+    part(m.sisters, m.sistersMarried, "sister", "sisters"),
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "No brothers or sisters";
+}
+
 /** A member's own account: includes their own contact details, never admin notes. */
 export async function toSelf(m: FullMember) {
   const ap = activePlan(m.membershipPlans ?? []);
   return {
     ...(await toPublicProfile(m, true)),
     fullName: m.fullName, phone: m.phone, email: m.email,
-    income: m.income, fatherName: m.fatherName, motherName: m.motherName, createdBy: m.createdBy,
+    income: m.income, incomeCurrency: m.incomeCurrency, fatherName: m.fatherName, motherName: m.motherName, createdBy: m.createdBy,
     religion: m.religion, country: m.country,
     familyPhone: m.familyPhone, familyEmail: m.familyEmail,
     dob: m.dob, dobIsApproximate: m.dobIsApproximate, status: m.status, mustChangePassword: m.mustChangePassword,
@@ -176,7 +214,7 @@ export async function toSelf(m: FullMember) {
     prefs: {
       communities: list(m.prefCommunities), cities: list(m.prefCities),
       education: list(m.prefEducation), occupation: list(m.prefOccupation),
-      countries: list(m.prefCountries), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, incomeMin: m.prefIncomeMin,
+      countries: list(m.prefCountries), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, incomeMin: m.prefIncomeMin, incomeCurrency: m.prefIncomeCurrency,
       notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
     },
     currentPlan: ap ? { plan: ap.plan, endDate: ap.endDate } : null,

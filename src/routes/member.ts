@@ -7,12 +7,14 @@ import { requireApproved, requireMember } from "../lib/auth";
 import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, visibleProfile } from "../lib/matching";
 import { mutualSelect, toMutualProfile, toPublicProfile, toSelf, type MutualMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
+import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
 import { verifyCity } from "../lib/cities";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { ID_PROOF_TYPES, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
+import { checkSiblingCounts, ID_PROOF_TYPES, manglikClearable, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
+import { INCOME_CURRENCIES, incomeFieldsPatch } from "../lib/choices";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
 import { isContactShared, sharedWith } from "../lib/contact-share";
@@ -101,6 +103,10 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   requireConsent(req.body);
   const str = z.string().trim().max(2000).optional();
   const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().optional());
+  const clearableCount = z.preprocess(
+    (v) => (v === "" || v === null ? null : v === undefined ? undefined : Number(v)),
+    z.number("Enter a whole number").int("Enter a whole number").min(0, "Cannot be less than 0").max(20, "Enter 20 or fewer").nullable().optional(),
+  );
   const arr = z.preprocess((v) => {
     if (Array.isArray(v)) return v;
     if (typeof v === "string" && v.trim()) return v.split(",").map((s) => s.trim()).filter(Boolean);
@@ -114,23 +120,69 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     dob: z.string().refine((s) => { const d = new Date(s); const age = (Date.now() - d.getTime()) / 31557600000; return !isNaN(d.getTime()) && age >= 18 && age <= 80; }, "Enter a valid date of birth (18 years or older)").optional(),
     heightCm: num, weightKg: weightKgField,
     maritalStatus: str, motherTongue: str, diet: str, createdBy: str,
+    // Optional: "" clears it, a missing key leaves it alone, and an older app build that never
+    // sends it is unaffected.
+    manglik: manglikClearable,
     community: str, subCommunity: str,
     city: clearable, state: clearable, nativePlace: str,
     // Where they live. Any non-empty text is kept, so a country we do not list still saves.
     country: z.string().trim().min(1).max(100).optional(),
     visaType: clearable, visaExpiry: clearable,
-    education: str, profession: str, income: str, about: str,
+    // Closed lists, and clearable: "" empties the field, a missing key leaves it alone.
+    education: clearable, profession: clearable,
+    // "" clears the band. The currency is checked against the band below; a missing currency keeps the stored one.
+    income: clearable,
+    incomeCurrency: z.preprocess(
+      (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim().toUpperCase() : v),
+      z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
+    ),
+    about: str,
     fatherName: str, fatherOccupation: str,
     motherName: str, motherOccupation: str,
-    siblings: str, familyType: str, familyBackground: str,
+    // Four counts; "" clears one. `siblings` is retired but still accepted and ignored, so an
+    // older app build keeps saving without an error. See DEPRECATIONS.md.
+    brothers: clearableCount, brothersMarried: clearableCount,
+    sisters: clearableCount, sistersMarried: clearableCount,
+    siblings: str,
+    familyType: str, familyBackground: str,
     prefAgeMin: num, prefAgeMax: num, prefHeightMinCm: num,
-    prefMaritalStatus: str, prefRelocate: str, prefIncomeMin: str, prefNotes: str,
+    prefMaritalStatus: str, prefRelocate: str,
+    prefIncomeMin: clearable,
+    prefIncomeCurrency: z.preprocess(
+      (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim().toUpperCase() : v),
+      z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
+    ),
+    prefNotes: str,
     prefCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, country, visaType, visaExpiry, ...rest } = d;
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
+  // Closed lists. A key that was not sent stays untouched; "" still clears the field.
+  if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
+  if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
 
   const member = await loadMe(me(req));
+  // "3 of my 2 brothers are married" has to be refused here too, not only on the public form.
+  // A field that was not sent keeps whatever is already stored, so the stored value is the
+  // fallback for the comparison.
+  const siblingIssues: Record<string, string> = {};
+  checkSiblingCounts(
+    {
+      brothers: rest.brothers !== undefined ? rest.brothers : member.brothers,
+      brothersMarried: rest.brothersMarried !== undefined ? rest.brothersMarried : member.brothersMarried,
+      sisters: rest.sisters !== undefined ? rest.sisters : member.sisters,
+      sistersMarried: rest.sistersMarried !== undefined ? rest.sistersMarried : member.sistersMarried,
+    },
+    (path, message) => { siblingIssues[path] = message; },
+  );
+  if (Object.keys(siblingIssues).length) {
+    throw new HttpError(422, Object.values(siblingIssues)[0], { fields: siblingIssues });
+  }
+  const incomePatch = incomeFieldsPatch(
+    { income, incomeCurrency, prefIncomeMin, prefIncomeCurrency },
+    { income: member.income, incomeCurrency: member.incomeCurrency, prefIncomeMin: member.prefIncomeMin, prefIncomeCurrency: member.prefIncomeCurrency },
+  );
+  if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
   const nextCountry = (country ?? member.country ?? "IN").trim() || "IN";
   const countryChanged = country !== undefined && nextCountry !== (member.country || "IN");
 
@@ -159,7 +211,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     if (state === undefined || state === null) resolvedState = null;
   }
 
-  const data: Record<string, unknown> = { ...rest };
+  const data: Record<string, unknown> = { ...rest, ...incomePatch.patch };
   if (country !== undefined) data.country = nextCountry;
   if (resolvedCity !== undefined) data.city = resolvedCity;
   if (resolvedState !== undefined) data.state = resolvedState;
@@ -312,9 +364,9 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
     city: csv, maritalStatus: csv, education: csv, profession: csv, diet: csv, community: csv,
     subCommunity: csv, state: csv, motherTongue: csv, familyType: csv, nativePlace: csv,
     country: csv,
-    // One band from the income ladder; lib/matching.ts reads it as "that band or higher"
-    // and ignores anything not on the ladder.
+    // One band from that currency's ladder. Omitted currency means INR. An unknown pair is ignored.
     incomeMin: z.string().trim().max(40).optional(),
+    incomeCurrency: z.string().trim().max(8).optional(),
     hasPhoto: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     justJoined: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     nearby: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),

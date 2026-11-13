@@ -3,6 +3,7 @@ import multer from "multer";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { learnTagValuesFor } from "../lib/tags";
+import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
@@ -11,7 +12,7 @@ import { removeObject, saveUpload } from "../lib/storage";
 import { checkPhone, isCountry, type CountryCode } from "../lib/phone";
 import { searchCities, verifyCity } from "../lib/cities";
 import { sendSubmissionReceived } from "../lib/notify";
-import { DIETS, INCOME_RANGES } from "../lib/choices";
+import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, isIncomeBand } from "../lib/choices";
 
 // Shared with lib/matching.ts (the feed filters); defined in lib/choices.ts and re-exported here
 // so the long-standing `from "./public"` imports keep working.
@@ -42,6 +43,39 @@ const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)),
 const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v === "1", z.boolean());
 
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
+
+/**
+ * Mangal Dosha, as the forms ask it. Optional everywhere on purpose: null means "not answered",
+ * which is not the same as "No" — many families leave it blank, and an app build that predates the
+ * field must keep submitting successfully.
+ */
+export const MANGLIK_VALUES = ["Yes", "No"] as const;
+
+/**
+ * Folds the spellings this field actually arrives in onto "Yes" / "No".
+ *
+ * The web and app send the canonical values, but this same intake runs the Google-Form webhook and
+ * the bulk imports, where the answer is whatever somebody typed into a spreadsheet — "yes", "NO",
+ * "y". Anything else is left untouched so the enum below rejects it rather than being quietly
+ * misread.
+ */
+const foldManglik = (v: unknown) => {
+  if (typeof v !== "string") return v;
+  const t = v.trim().toLowerCase();
+  if (!t) return undefined;
+  if (["yes", "y", "true", "manglik"].includes(t)) return "Yes";
+  if (["no", "n", "false", "non manglik", "non-manglik"].includes(t)) return "No";
+  return v;
+};
+
+/** Intake: absent or blank means "not answered". */
+export const manglikField = z.preprocess(foldManglik,
+  z.enum(MANGLIK_VALUES, { message: "Choose Yes or No for Manglik" }).optional());
+
+/** Edits: the same, plus "" / null as an explicit clear. */
+export const manglikClearable = z.preprocess(
+  (v) => (v === "" || v === null ? null : foldManglik(v)),
+  z.enum(MANGLIK_VALUES, { message: "Choose Yes or No for Manglik" }).nullable().optional());
 
 /** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
 export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "H-1B visa", "Work visa (other)", "Student visa", "Dependent / spouse visa (H-4 etc.)", "Business visa", "Visitor visa", "Other"] as const;
@@ -75,6 +109,13 @@ export const RELOCATE = ["Yes", "Maybe", "No"] as const;
 /** An optional field whose value must come from a fixed list; "" is treated as "not given". */
 const oneOfList = <T extends readonly [string, ...string[]]>(vals: T, msg: string) =>
   z.string().trim().pipe(z.enum(vals, { message: msg })).optional().or(z.literal("").transform(() => undefined));
+/** A salary band. Which ladder it must belong to is checked against the currency sent with it. */
+const optionalIncome = z.string().trim().max(40).optional().or(z.literal("").transform(() => undefined));
+/** Blank means "not sent", so an older client that omits it keeps the stored currency (INR for existing rows). */
+const optionalCurrency = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim().toUpperCase() : v),
+  z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
+);
 const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a supported country");
 // Residence country accepts any non-empty string so members from unlisted countries can still submit.
 const countryField = z.string().trim().min(1).max(100).default("IN");
@@ -105,6 +146,47 @@ export const birthTimeField = z.string().trim()
     return t;
   })
   .optional().or(z.literal("").transform(() => undefined));
+/**
+ * One brother/sister count.
+ *
+ * Optional like the rest of the bio data. Absent means "not answered"; 0 means "none", which is a
+ * different answer and the one the old free-text "None" entries were making. 20 is a sanity cap,
+ * not a judgement.
+ */
+export const siblingCount = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : Number(v)),
+  z.number("Enter a whole number").int("Enter a whole number").min(0, "Cannot be less than 0").max(20, "Enter 20 or fewer").optional(),
+);
+
+/** The four counts, for spreading into a schema. */
+export const siblingFields = {
+  brothers: siblingCount,
+  brothersMarried: siblingCount,
+  sisters: siblingCount,
+  sistersMarried: siblingCount,
+};
+
+type SiblingCounts = {
+  brothers?: number | null; brothersMarried?: number | null;
+  sisters?: number | null; sistersMarried?: number | null;
+};
+
+/**
+ * "3 of my 2 brothers are married" is not a thing, and a married count with no total is an answer
+ * to a question nobody asked. Reported against the married field, which is the one to correct.
+ */
+export function checkSiblingCounts(v: SiblingCounts, addIssue: (path: string, message: string) => void) {
+  for (const [total, married, label] of [
+    ["brothers", "brothersMarried", "brothers"],
+    ["sisters", "sistersMarried", "sisters"],
+  ] as const) {
+    const m = v[married], t = v[total];
+    if (m == null) continue;
+    if (t == null) { addIssue(married, `Enter how many ${label} there are first`); continue; }
+    if (m > t) addIssue(married, `Cannot be more than the number of ${label}`);
+  }
+}
+
 export const weightKgField = z.preprocess(
   (v) => (v === "" || v == null ? undefined : Number(v)),
   z.number("Enter the weight in kilograms").int("Enter the weight in whole kilograms").min(30, "Enter a weight of 30 kg or more").max(250, "Enter a weight of 250 kg or less").optional(),
@@ -135,17 +217,25 @@ const intakeBase = z.object({
     z.number().int("Enter the height in whole centimetres").min(120, "Enter a height of 120 cm or more").max(250, "Enter a height of 250 cm or less").optional()),
   weightKg: weightKgField,
   birthTime: birthTimeField, birthPlace: opt,
+  manglik: manglikField,
   // Both web forms mark marital status required, so the API requires it too.
   maritalStatus: z.string().trim().min(1, "Select marital status").pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
   education: opt, profession: opt,
-  income: oneOfList(INCOME_RANGES, "Choose an annual income range from the list"),
+  income: optionalIncome,
+  incomeCurrency: optionalCurrency,
   diet: oneOfList(DIETS, "Choose a diet from the list"),
-  fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
+  fatherOccupation: opt, motherOccupation: opt, familyBackground: opt, about: opt,
+  ...siblingFields,
+  // Retired, and still accepted so an older app build submits without a validation error. The
+  // value is dropped: see where `siblings` is stripped before the create below. DEPRECATIONS.md
+  // says when this can go.
+  siblings: opt,
   prefCommunities: arr.optional(), prefCities: arr.optional(),
   prefEducation: arr.optional(), prefOccupation: arr.optional(), prefCountries: arr.optional(),
   prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
-  prefIncomeMin: oneOfList(INCOME_RANGES, "Choose a minimum income from the list"),
+  prefIncomeMin: optionalIncome,
+  prefIncomeCurrency: optionalCurrency,
   motherTongue: opt, fatherName: opt, motherName: opt, createdBy: opt,
   familyType: oneOfList(FAMILY_TYPES, "Choose a family type from the list"),
   prefHeightMinCm: num,
@@ -156,6 +246,16 @@ const intakeBase = z.object({
 
 /** Cross-field rules: the mobile numbers must be valid for their country and the city must exist in the chosen country. */
 export const intakeSchema = intakeBase.transform((v, ctx) => {
+  // Missing currency with a band means INR. A band must sit on that currency's ladder. No conversion.
+  const incomeCurrency = v.incomeCurrency ?? "INR";
+  if (v.income && !isIncomeBand(incomeCurrency, v.income)) {
+    ctx.addIssue({ code: "custom", path: ["income"], message: "Choose an annual income range from the list" });
+  }
+  const prefIncomeCurrency = v.prefIncomeCurrency ?? "INR";
+  if (v.prefIncomeMin && !isIncomeBand(prefIncomeCurrency, v.prefIncomeMin)) {
+    ctx.addIssue({ code: "custom", path: ["prefIncomeMin"], message: "Choose a minimum income from the list" });
+  }
+  checkSiblingCounts(v, (path, message) => ctx.addIssue({ code: "custom", path: [path], message }));
   const country = v.country as CountryCode;
   const out = { ...v, country, phone: v.phone, familyPhone: v.familyPhone as string | undefined };
   const p = checkPhone(v.phone, (v.phoneCountry ?? country) as CountryCode);
@@ -174,7 +274,7 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
   }
   const { phoneCountry, familyPhoneCountry, ...rest } = out;
   void phoneCountry; void familyPhoneCountry;
-  return { ...rest, religion: "Hindu" };
+  return { ...rest, incomeCurrency, prefIncomeCurrency, religion: "Hindu" };
 });
 
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
@@ -184,7 +284,11 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, ...rest } = input;
+  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, ...rest } = input;
+  // Closed lists: an off-list value is folded to "Other" rather than refused, so an older client
+  // can still submit, and the column keeps only values the feed filters can offer.
+  rest.education = coerceEducation(rest.education) ?? undefined;
+  rest.profession = coerceProfession(rest.profession) ?? undefined;
   const visaType = normalizeVisaType(rawVisaType);
   // Living outside India: the visa or status is required when people register themselves. Admin
   // entry may leave it empty (the office often does not have it yet).
