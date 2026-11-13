@@ -14,7 +14,7 @@ import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
-import { createSubmission, DIETS, FAMILY_TYPES, INCOME_RANGES, intakeSchema, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, RELOCATE } from "./public";
+import { createSubmission, DIETS, FAMILY_TYPES, INCOME_RANGES, intakeSchema, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, normalizeVisaType, RELOCATE } from "./public";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
 import { checkAnyPhone, checkPhone, isCountry, type CountryCode } from "../lib/phone";
@@ -81,7 +81,7 @@ const listQuery = z.object({
 function applyMultiContains(
   w: Prisma.MemberWhereInput,
   and: Prisma.MemberWhereInput[],
-  field: "city" | "community" | "subCommunity",
+  field: "city" | "community" | "subCommunity" | "education" | "profession",
   raw?: string,
 ) {
   if (!raw) return;
@@ -111,8 +111,8 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   if (q.maritalStatus) w.maritalStatus = q.maritalStatus;
   if (q.heightMin) w.heightCm = { ...(w.heightCm as object), gte: q.heightMin };
   if (q.heightMax) w.heightCm = { ...(w.heightCm as object), lte: q.heightMax };
-  if (q.education)    w.education = { contains: q.education, mode: "insensitive" };
-  if (q.profession)   w.profession = { contains: q.profession, mode: "insensitive" };
+  applyMultiContains(w, and, "education", q.education);
+  applyMultiContains(w, and, "profession", q.profession);
   if (q.income)       w.income = { contains: q.income, mode: "insensitive" };
   if (q.diet)         w.diet = q.diet;
   if (q.state)        w.state = { contains: q.state, mode: "insensitive" };
@@ -331,18 +331,19 @@ const editSchema = z.object({
   }
 });
 
-/** Admin edit of the visa expiry: undefined = untouched, null = cleared, Date = new value. */
-function visaExpiryValue(v: string | null | undefined): Date | null | undefined {
-  if (v === undefined) return undefined;
-  if (v === null || v === "") return null;
-  const d = new Date(v);
-  if (isNaN(d.getTime())) throw new HttpError(422, "Enter a valid visa expiry date.", { fields: { visaExpiry: "Enter a valid expiry date" } });
-  return d;
-}
+/**
+ * The visa expiry date is retired.
+ *
+ * `visaExpiry` stays in the edit schemas so an older client can keep sending it without a
+ * validation error, but nothing is written any more: this always reports "untouched". The column
+ * and the serialized field remain, so values captured before the field was retired still display.
+ */
+const visaExpiryValue = (_v: string | null | undefined): Date | null | undefined => undefined;
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, ...d } = editSchema.parse(req.body);
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
+  if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
   // This route carries no country field, so the number's own +dialcode decides it (else India).
   for (const field of ["phone", "familyPhone"] as const) {
     const raw = d[field];
@@ -399,6 +400,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, ...d } = fullEditSchema.parse(body);
   void _age;
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
+  if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
   // Normalise both numbers before they are written. Falls back to the member's residence country
   // when the form did not say which country the number was typed under.
   const residence = await prisma.member.findUniqueOrThrow({ where: { id }, select: { country: true } });

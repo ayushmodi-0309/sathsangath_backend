@@ -16,6 +16,7 @@
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts",
     "mail:check": "tsx scripts/mail-check.ts",
     "tags:backfill": "tsx scripts/backfill-tags.ts",
+    "visa:normalize": "tsx scripts/normalize-visa-types.ts",
     "photos:fix-main": "tsx scripts/fix-main-photos.ts",
     "egress:check": "tsx scripts/egress-check.ts"
   },
