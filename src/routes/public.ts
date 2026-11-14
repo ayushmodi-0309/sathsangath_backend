@@ -3,15 +3,18 @@ import multer from "multer";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { learnTagValuesFor } from "../lib/tags";
+import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
 import { rateLimit } from "express-rate-limit";
 import { removeObject, saveUpload } from "../lib/storage";
 import { checkPhone, isCountry, type CountryCode } from "../lib/phone";
-import { searchCities, verifyCity } from "../lib/cities";
+import { searchCities } from "../lib/cities";
+import { INDIA_LOCATIONS_VERSION, INDIA_STATE_LIST, districtsOf, resolveLegacyCity, resolveLocation, stateEntry, townsOf } from "../lib/locations";
+import { ALL_COUNTRIES } from "../lib/countries-data";
 import { sendSubmissionReceived } from "../lib/notify";
-import { DIETS, INCOME_RANGES } from "../lib/choices";
+import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, isIncomeBand } from "../lib/choices";
 
 // Shared with lib/matching.ts (the feed filters); defined in lib/choices.ts and re-exported here
 // so the long-standing `from "./public"` imports keep working.
@@ -42,6 +45,39 @@ const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)),
 const bool = z.preprocess((v) => v === true || v === "true" || v === "on" || v === "1", z.boolean());
 
 export const ID_PROOF_TYPES = ["AADHAAR", "GREEN_CARD", "VISA", "PASSPORT", "OTHER"] as const;
+
+/**
+ * Mangal Dosha, as the forms ask it. Optional everywhere on purpose: null means "not answered",
+ * which is not the same as "No" — many families leave it blank, and an app build that predates the
+ * field must keep submitting successfully.
+ */
+export const MANGLIK_VALUES = ["Yes", "No"] as const;
+
+/**
+ * Folds the spellings this field actually arrives in onto "Yes" / "No".
+ *
+ * The web and app send the canonical values, but this same intake runs the Google-Form webhook and
+ * the bulk imports, where the answer is whatever somebody typed into a spreadsheet — "yes", "NO",
+ * "y". Anything else is left untouched so the enum below rejects it rather than being quietly
+ * misread.
+ */
+const foldManglik = (v: unknown) => {
+  if (typeof v !== "string") return v;
+  const t = v.trim().toLowerCase();
+  if (!t) return undefined;
+  if (["yes", "y", "true", "manglik"].includes(t)) return "Yes";
+  if (["no", "n", "false", "non manglik", "non-manglik"].includes(t)) return "No";
+  return v;
+};
+
+/** Intake: absent or blank means "not answered". */
+export const manglikField = z.preprocess(foldManglik,
+  z.enum(MANGLIK_VALUES, { message: "Choose Yes or No for Manglik" }).optional());
+
+/** Edits: the same, plus "" / null as an explicit clear. */
+export const manglikClearable = z.preprocess(
+  (v) => (v === "" || v === null ? null : foldManglik(v)),
+  z.enum(MANGLIK_VALUES, { message: "Choose Yes or No for Manglik" }).nullable().optional());
 
 /** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
 export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "H-1B visa", "Work visa (other)", "Student visa", "Dependent / spouse visa (H-4 etc.)", "Business visa", "Visitor visa", "Other"] as const;
@@ -75,6 +111,13 @@ export const RELOCATE = ["Yes", "Maybe", "No"] as const;
 /** An optional field whose value must come from a fixed list; "" is treated as "not given". */
 const oneOfList = <T extends readonly [string, ...string[]]>(vals: T, msg: string) =>
   z.string().trim().pipe(z.enum(vals, { message: msg })).optional().or(z.literal("").transform(() => undefined));
+/** A salary band. Which ladder it must belong to is checked against the currency sent with it. */
+const optionalIncome = z.string().trim().max(40).optional().or(z.literal("").transform(() => undefined));
+/** Blank means "not sent", so an older client that omits it keeps the stored currency (INR for existing rows). */
+const optionalCurrency = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim().toUpperCase() : v),
+  z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
+);
 const countryBase = z.string().trim().toUpperCase().refine(isCountry, "Choose a supported country");
 // Residence country accepts any non-empty string so members from unlisted countries can still submit.
 const countryField = z.string().trim().min(1).max(100).default("IN");
@@ -105,6 +148,47 @@ export const birthTimeField = z.string().trim()
     return t;
   })
   .optional().or(z.literal("").transform(() => undefined));
+/**
+ * One brother/sister count.
+ *
+ * Optional like the rest of the bio data. Absent means "not answered"; 0 means "none", which is a
+ * different answer and the one the old free-text "None" entries were making. 20 is a sanity cap,
+ * not a judgement.
+ */
+export const siblingCount = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : Number(v)),
+  z.number("Enter a whole number").int("Enter a whole number").min(0, "Cannot be less than 0").max(20, "Enter 20 or fewer").optional(),
+);
+
+/** The four counts, for spreading into a schema. */
+export const siblingFields = {
+  brothers: siblingCount,
+  brothersMarried: siblingCount,
+  sisters: siblingCount,
+  sistersMarried: siblingCount,
+};
+
+type SiblingCounts = {
+  brothers?: number | null; brothersMarried?: number | null;
+  sisters?: number | null; sistersMarried?: number | null;
+};
+
+/**
+ * "3 of my 2 brothers are married" is not a thing, and a married count with no total is an answer
+ * to a question nobody asked. Reported against the married field, which is the one to correct.
+ */
+export function checkSiblingCounts(v: SiblingCounts, addIssue: (path: string, message: string) => void) {
+  for (const [total, married, label] of [
+    ["brothers", "brothersMarried", "brothers"],
+    ["sisters", "sistersMarried", "sisters"],
+  ] as const) {
+    const m = v[married], t = v[total];
+    if (m == null) continue;
+    if (t == null) { addIssue(married, `Enter how many ${label} there are first`); continue; }
+    if (m > t) addIssue(married, `Cannot be more than the number of ${label}`);
+  }
+}
+
 export const weightKgField = z.preprocess(
   (v) => (v === "" || v == null ? undefined : Number(v)),
   z.number("Enter the weight in kilograms").int("Enter the weight in whole kilograms").min(30, "Enter a weight of 30 kg or more").max(250, "Enter a weight of 250 kg or less").optional(),
@@ -135,17 +219,25 @@ const intakeBase = z.object({
     z.number().int("Enter the height in whole centimetres").min(120, "Enter a height of 120 cm or more").max(250, "Enter a height of 250 cm or less").optional()),
   weightKg: weightKgField,
   birthTime: birthTimeField, birthPlace: opt,
+  manglik: manglikField,
   // Both web forms mark marital status required, so the API requires it too.
   maritalStatus: z.string().trim().min(1, "Select marital status").pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
-  community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
+  community: opt, subCommunity: opt, city: opt, state: opt, district: opt, nativePlace: opt,
   education: opt, profession: opt,
-  income: oneOfList(INCOME_RANGES, "Choose an annual income range from the list"),
+  income: optionalIncome,
+  incomeCurrency: optionalCurrency,
   diet: oneOfList(DIETS, "Choose a diet from the list"),
-  fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
+  fatherOccupation: opt, motherOccupation: opt, familyBackground: opt, about: opt,
+  ...siblingFields,
+  // Retired, and still accepted so an older app build submits without a validation error. The
+  // value is dropped: see where `siblings` is stripped before the create below. DEPRECATIONS.md
+  // says when this can go.
+  siblings: opt,
   prefCommunities: arr.optional(), prefCities: arr.optional(),
   prefEducation: arr.optional(), prefOccupation: arr.optional(), prefCountries: arr.optional(),
   prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
-  prefIncomeMin: oneOfList(INCOME_RANGES, "Choose a minimum income from the list"),
+  prefIncomeMin: optionalIncome,
+  prefIncomeCurrency: optionalCurrency,
   motherTongue: opt, fatherName: opt, motherName: opt, createdBy: opt,
   familyType: oneOfList(FAMILY_TYPES, "Choose a family type from the list"),
   prefHeightMinCm: num,
@@ -154,8 +246,18 @@ const intakeBase = z.object({
   consent: bool.refine((v) => v, "Consent is required to submit your bio data"),
 });
 
-/** Cross-field rules: the mobile numbers must be valid for their country and the city must exist in the chosen country. */
+/** Cross-field rules: the mobile numbers must be valid for their country and the place of living must be one the pickers offer. */
 export const intakeSchema = intakeBase.transform((v, ctx) => {
+  // Missing currency with a band means INR. A band must sit on that currency's ladder. No conversion.
+  const incomeCurrency = v.incomeCurrency ?? "INR";
+  if (v.income && !isIncomeBand(incomeCurrency, v.income)) {
+    ctx.addIssue({ code: "custom", path: ["income"], message: "Choose an annual income range from the list" });
+  }
+  const prefIncomeCurrency = v.prefIncomeCurrency ?? "INR";
+  if (v.prefIncomeMin && !isIncomeBand(prefIncomeCurrency, v.prefIncomeMin)) {
+    ctx.addIssue({ code: "custom", path: ["prefIncomeMin"], message: "Choose a minimum income from the list" });
+  }
+  checkSiblingCounts(v, (path, message) => ctx.addIssue({ code: "custom", path: [path], message }));
   const country = v.country as CountryCode;
   const out = { ...v, country, phone: v.phone, familyPhone: v.familyPhone as string | undefined };
   const p = checkPhone(v.phone, (v.phoneCountry ?? country) as CountryCode);
@@ -167,24 +269,45 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
   if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
     ctx.addIssue({ code: "custom", path: ["prefAgeMax"], message: "The maximum age must be more than the minimum age" });
   }
-  if (v.city) {
-    const hit = verifyCity(country, v.city, v.state);
-    if (!hit) ctx.addIssue({ code: "custom", path: ["city"], message: `We could not find "${v.city}" in ${country === "IN" ? "India" : country}. Please pick your city from the suggestions.` });
-    else { out.city = hit.name; out.state = hit.state || v.state; }
+  // Place of living, resolved as one thing: see lib/locations.ts. The Google-Form webhook and the
+  // bulk imports carry a free-typed city and no district, so a city is folded onto its district
+  // rather than refused; `createSubmission` is where the website form is held to having one.
+  const place = resolveLocation(
+    v.district || !v.city ? { country, state: v.state, district: v.district, city: v.city } : (resolveLegacyCity(v.city, v.state) ?? { country, state: v.state, city: v.city }),
+  );
+  if (!place.ok) ctx.addIssue({ code: "custom", path: [place.field], message: place.message });
+  else {
+    out.state = place.value.state ?? undefined;
+    out.district = place.value.district ?? undefined;
+    out.city = place.value.city ?? undefined;
   }
   const { phoneCountry, familyPhoneCountry, ...rest } = out;
   void phoneCountry; void familyPhoneCountry;
-  return { ...rest, religion: "Hindu" };
+  return { ...rest, incomeCurrency, prefIncomeCurrency, religion: "Hindu" };
 });
 
+/**
+ * True when the request itself carried a `district` field, whatever its value.
+ *
+ * This is how a client that knows about districts is told apart from one that does not, since both
+ * the web wizard and every mobile build post to the same endpoints. An empty string counts: a
+ * district-aware client that sends a blank one is asking to be told it is required.
+ */
+export const sentDistrict = (req: { body?: unknown }) =>
+  typeof (req.body as Record<string, unknown> | undefined)?.district === "string";
+
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
-export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string, dobIsApproximate?: boolean) {
+export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string, dobIsApproximate?: boolean, opts?: { requireDistrict?: boolean }) {
   const dupe = await prisma.member.findFirst({
     where: { OR: [{ phone: input.phone }, ...(input.email ? [{ email: input.email }] : [])] },
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, ...rest } = input;
+  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, ...rest } = input;
+  // Closed lists: an off-list value is folded to "Other" rather than refused, so an older client
+  // can still submit, and the column keeps only values the feed filters can offer.
+  rest.education = coerceEducation(rest.education) ?? undefined;
+  rest.profession = coerceProfession(rest.profession) ?? undefined;
   const visaType = normalizeVisaType(rawVisaType);
   // Living outside India: the visa or status is required when people register themselves. Admin
   // entry may leave it empty (the office often does not have it yet).
@@ -194,6 +317,17 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
   // stored. The column and the serialized field stay so existing values keep displaying.
   if (rest.country && rest.country !== "IN") {
     if (source === "WEB" && !visaType) throw new HttpError(422, "Tell us which visa or status you have.", { fields: { visaType: "Choose your visa or status" } });
+  }
+  // A client that knows about districts has to supply one for India. `requireDistrict` is set by
+  // the route from whether the request carried a `district` field at all, NOT from the source:
+  // the web wizard and the mobile app post to the same endpoint, and an app build that predates
+  // the district cannot satisfy a rule it has never heard of. Those submissions come through with
+  // whatever `resolveLegacyCity` could make of the free-typed city — which is a district for about
+  // three quarters of the cities that picker offers, and nothing for the rest. Refusing the rest
+  // would be a dead end on the signup screen, so they are let through the way a profile with no
+  // city has always been.
+  if (opts?.requireDistrict && (rest.country ?? "IN") === "IN" && !rest.district) {
+    throw new HttpError(422, "Choose the district you live in.", { fields: { district: "Choose a district" } });
   }
   if (!dob) throw new HttpError(422, "Enter a date of birth or age.", { fields: { dob: "Enter a date of birth or age" } });
   const { photoUrls, ...fileFields } = files ?? {};
@@ -236,7 +370,7 @@ publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount:
   const biodataFileUrl = f?.biodata?.[0] ? await saveUpload("docs", f.biodata[0]) : undefined;
   const idProofUrl = f?.idproof?.[0] ? await saveUpload("docs", f.idproof[0]) : undefined;
   let m;
-  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl, idProofUrl }); }
+  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl, idProofUrl }, undefined, undefined, { requireDistrict: sentDistrict(req) }); }
   catch (e) { await Promise.all([removeObject(photoUrl), removeObject(biodataFileUrl), removeObject(idProofUrl)]); throw e; } // e.g. duplicate phone: don't orphan files
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
@@ -248,11 +382,55 @@ publicRouter.post("/intake-webhook", wrap(async (req, res) => {
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
 
-// City suggestions for the bio data form (and the mobile apps): ?country=IN&q=ahm
 const geoLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please slow down." } });
+
+/**
+ * City suggestions: ?country=IN&q=ahm
+ *
+ * LEGACY. The place of living is a closed cascade now — see /locations below — but the app builds
+ * already in people's hands drive their city picker off this endpoint, and both the web form and
+ * the app still use it for the native place (vatan), which stays free text. Keep it.
+ */
 publicRouter.get("/cities", geoLimiter, wrap(async (req, res) => {
   const { country, q } = z.object({ country: countryField, q: z.string().trim().default("") }).parse(req.query);
   res.json(searchCities(country as CountryCode, q, 10));
+}));
+
+/**
+ * The place-of-living lists: every country, and for India the state → district → city/town tree.
+ *
+ * Served rather than bundled so the mobile app picks up a data refresh — a district renamed, a new
+ * one carved out — without waiting for a store release. Cached for a day and tagged with the data
+ * version, so a client that already has the current tree gets a 304.
+ *
+ *   /locations                    countries + India's states and districts (no towns)
+ *   /locations?state=GJ           that state's districts, each with its towns
+ *   /locations?full=1             everything, towns included (~400 KB)
+ */
+publicRouter.get("/locations", geoLimiter, wrap(async (req, res) => {
+  const { state, full } = z.object({
+    state: z.string().trim().max(60).optional(),
+    full: z.enum(["1", "true"]).optional(),
+  }).parse(req.query);
+
+  const districtsFor = (s: { code: string; name: string }, withTowns: boolean) =>
+    districtsOf(s.code).map((district) => ({
+      district,
+      ...(withTowns ? { towns: townsOf(s.code, district) } : {}),
+    }));
+
+  const one = state ? stateEntry(state) : null;
+  if (state && !one) throw new HttpError(404, "No such Indian state or union territory.");
+
+  const states = one ? [one] : INDIA_STATE_LIST;
+  const body = {
+    version: INDIA_LOCATIONS_VERSION,
+    countries: ALL_COUNTRIES.map(([code, name]) => ({ code, name })),
+    india: states.map((s) => ({ code: s.code, name: s.name, districts: districtsFor(s, Boolean(one) || Boolean(full)) })),
+  };
+  res.set("Cache-Control", "public, max-age=86400");
+  res.set("ETag", `W/"geo-${INDIA_LOCATIONS_VERSION}-${state ?? (full ? "full" : "admin")}"`);
+  res.json(body);
 }));
 
 publicRouter.get("/tags", wrap(async (_req, res) => {

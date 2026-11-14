@@ -2,8 +2,9 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { ageFrom } from "./util";
 import { mutualSelect, publicSelect, type MutualMember, type PublicMember } from "./serializers";
-import { DIETS, INCOME_RANGES, incomeAtLeast } from "./choices";
+import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, INCOME_RANGES_BY_CURRENCY, incomeAtLeast } from "./choices";
 import { ALL_COUNTRIES } from "./countries-data";
+import { INDIA } from "./locations";
 
 /** Member + tags + photos + plans: the whole record, for the admin portal and a member's own account. */
 export const includeTags = {
@@ -27,10 +28,22 @@ export type FeedFilters = {
   ageMin?: number; ageMax?: number; heightMin?: number; heightMax?: number;
   city?: string[]; maritalStatus?: string[]; education?: string[]; profession?: string[]; diet?: string[]; community?: string[];
   subCommunity?: string[]; state?: string[]; motherTongue?: string[]; familyType?: string[]; nativePlace?: string[];
+  /** India only: the districts they live in, e.g. ["Mehsana"]. See lib/locations.ts. */
+  district?: string[];
   /** ISO codes of the countries they live in, e.g. ["IN", "US"]. */
   country?: string[];
-  /** One band from INCOME_RANGES: matches that band and every band above it. */
+  /**
+   * Living in India, or anywhere but India. "Anywhere but India" is the reason this is its own
+   * filter rather than a country selection: it cannot be expressed by listing the 249 others.
+   */
+  residence?: "india" | "nri";
+  /**
+   * One band from that currency's ladder: matches that band and every band above
+   * it, and only profiles who chose the same currency. No conversion.
+   * `incomeCurrency` is ignored unless `incomeMin` is set; omitted means INR.
+   */
   incomeMin?: string;
+  incomeCurrency?: string;
   hasPhoto?: boolean;
   /** Approved within the last 14 days. */
   justJoined?: boolean;
@@ -57,10 +70,17 @@ export type FeedFilters = {
 
 /** The text columns a member can filter the feed on. */
 type TextFilterField = "city" | "maritalStatus" | "education" | "profession" | "diet" | "community"
-  | "subCommunity" | "state" | "motherTongue" | "familyType" | "nativePlace" | "country";
+  | "subCommunity" | "state" | "district" | "motherTongue" | "familyType" | "nativePlace" | "country";
 
 const TEXT_FILTER_FIELDS = ["city", "maritalStatus", "education", "profession", "diet", "community",
-  "subCommunity", "state", "motherTongue", "familyType", "nativePlace", "country"] as const satisfies readonly TextFilterField[];
+  "subCommunity", "state", "district", "motherTongue", "familyType", "nativePlace", "country"] as const satisfies readonly TextFilterField[];
+
+/**
+ * The four columns that make up one place of living. They are faceted together, by a single
+ * groupBy, so the clients can cascade country → state → district → city/town and never offer a
+ * value that matches nothing. The flat per-field lists are derived from the same rows.
+ */
+const LOCATION_FIELDS = ["country", "state", "district", "city"] as const satisfies readonly TextFilterField[];
 
 /** A profile as the browse feed serves it. */
 export type Candidate = PublicMember;
@@ -121,36 +141,52 @@ const ORDER: Record<NonNullable<FeedFilters["sort"]>, Prisma.MemberOrderByWithRe
  * override row ever crosses the wire.
  */
 async function feedScope(viewerId: string) {
-  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true, city: true } });
+  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true, city: true, district: true } });
   const conditions: Prisma.MemberWhereInput[] = [
     { status: "APPROVED" },
     { id: { not: viewerId } },
     { gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },
     { overridesAsProfile: { none: { viewerId, action: "HIDE" } } },
   ];
-  return { conditions, viewerCity: viewer.city };
+  return { conditions, viewerPlace: { district: viewer.district, city: viewer.city } };
 }
 
 /** One condition per active filter. Everything the member can narrow by is expressible in SQL. */
-function filterConditions(f: FeedFilters, viewerCity: string | null): Prisma.MemberWhereInput[] {
+function filterConditions(f: FeedFilters, viewerPlace: { district: string | null; city: string | null }): Prisma.MemberWhereInput[] {
   const and: Prisma.MemberWhereInput[] = [];
   const code = f.code?.trim();
   if (code) and.push({ profileCode: { contains: code, mode: "insensitive" } });
   if (f.hasPhoto) and.push(HAS_PHOTO);
   if (f.justJoined) and.push({ approvedAt: { gte: new Date(Date.now() - 14 * 86400000) } });
-  // A viewer with no city of their own has no "nearby": `in: []` matches nothing,
-  // which is what the old per-row check did.
-  if (f.nearby) and.push(viewerCity?.trim() ? { city: { equals: viewerCity.trim(), mode: "insensitive" } } : { id: { in: [] } });
+  // India, or not India. `country` defaults to "IN" and is never null, so this is a clean split of
+  // the feed in two; the comparison is case-insensitive only to be safe about older rows.
+  if (f.residence === "india") and.push({ country: { equals: INDIA, mode: "insensitive" } });
+  if (f.residence === "nri") and.push({ NOT: { country: { equals: INDIA, mode: "insensitive" } } });
+  // "Nearby" means the viewer's own district, which is the useful radius now that districts are a
+  // closed list — two families in Kadi and Unjha are neighbours, and only a district says so. It
+  // falls back to the city for a viewer whose district has not been filled in yet. A viewer with
+  // neither has no "nearby": `in: []` matches nothing, which is what the old per-row check did.
+  if (f.nearby) {
+    const district = viewerPlace.district?.trim();
+    const city = viewerPlace.city?.trim();
+    and.push(district ? { district: { equals: district, mode: "insensitive" } }
+      : city ? { city: { equals: city, mode: "insensitive" } }
+      : { id: { in: [] } });
+  }
   if (f.ageMin !== undefined) and.push({ dob: { lte: dobAt(f.ageMin) } });
   if (f.ageMax !== undefined) and.push({ dob: { gt: dobAt(f.ageMax + 1) } });
   // A null height fails a range test in SQL just as it did in the old comparison.
   if (f.heightMin !== undefined) and.push({ heightCm: { gte: f.heightMin } });
   if (f.heightMax !== undefined) and.push({ heightCm: { lte: f.heightMax } });
-  // "At least this band": the ladder is ordered, so this is a set membership test
-  // rather than a string comparison. An unrecognised band is ignored, exactly as
-  // an unrecognised text value is.
-  const bands = incomeAtLeast(f.incomeMin);
-  if (bands) and.push({ income: { in: bands } });
+  // "At least this band" inside one currency. The ladder is ordered, so this is a
+  // set membership test rather than a string comparison. An unrecognised pair is
+  // ignored. A currency on its own does not filter, and nothing is converted, so
+  // a dollar minimum never matches a rupee salary.
+  if (f.incomeMin) {
+    const currency = f.incomeCurrency?.trim().toUpperCase() || "INR";
+    const bands = incomeAtLeast(currency, f.incomeMin);
+    if (bands) and.push({ incomeCurrency: currency, income: { in: bands } });
+  }
   for (const field of TEXT_FILTER_FIELDS) {
     const w = textIn(field, f[field]);
     if (w) and.push(w);
@@ -176,11 +212,11 @@ export type FeedPage = { items: Candidate[]; total: number };
  * scrolls.
  */
 export async function feedPage(viewerId: string, filters: FeedFilters, page: number, pageSize: number, exclude: Set<string>): Promise<FeedPage> {
-  const { conditions, viewerCity } = await feedScope(viewerId);
+  const { conditions, viewerPlace } = await feedScope(viewerId);
   const where: Prisma.MemberWhereInput = {
     AND: [
       ...conditions,
-      ...filterConditions(filters, viewerCity),
+      ...filterConditions(filters, viewerPlace),
       ...(exclude.size ? [{ id: { notIn: [...exclude] } }] : []),
     ],
   };
@@ -244,6 +280,72 @@ const COUNTRY_NAME = new Map(ALL_COUNTRIES.map(([code, name]) => [code, name]));
 const byCountryName = (codes: string[]) =>
   [...codes].sort((a, b) => (COUNTRY_NAME.get(a) ?? a).localeCompare(COUNTRY_NAME.get(b) ?? b));
 
+type PlaceRow = { country: string | null; state: string | null; district: string | null; city: string | null; _count: { _all: number } };
+
+/**
+ * One groupBy over (country, state, district, city) turned into the cascade the Location filter
+ * needs, plus the flat per-column lists the older clients read.
+ *
+ * A blank at one level does not hide the levels above it: a member with a state but no district
+ * still counts towards their state, and towards their country.
+ */
+function locationFacets(rows: PlaceRow[]) {
+  type Leaf = { name: string; count: number };
+  type Node = { name: string; count: number; children: Map<string, Node> };
+  const countries = new Map<string, Node>();
+  const flat = { countries: new Set<string>(), states: new Set<string>(), districts: new Set<string>(), cities: new Set<string>() };
+
+  const bump = (into: Map<string, Node>, name: string, n: number) => {
+    const node = into.get(name) ?? { name, count: 0, children: new Map() };
+    node.count += n;
+    into.set(name, node);
+    return node;
+  };
+
+  for (const r of rows) {
+    const n = r._count._all;
+    const country = (r.country ?? "").trim();
+    const state = (r.state ?? "").trim();
+    const district = (r.district ?? "").trim();
+    const city = (r.city ?? "").trim();
+    if (!country) continue;
+    flat.countries.add(country);
+    const c = bump(countries, country, n);
+    if (!state) continue;
+    flat.states.add(state);
+    const st = bump(c.children, state, n);
+    if (!district) continue;
+    flat.districts.add(district);
+    const d = bump(st.children, district, n);
+    if (!city) continue;
+    flat.cities.add(city);
+    bump(d.children, city, n);
+  }
+
+  const alpha = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
+  const leaves = (m: Map<string, Node>): Leaf[] => [...m.values()].map(({ name, count }) => ({ name, count })).sort(alpha);
+
+  const tree = [...countries.values()]
+    .map((c) => ({
+      code: c.name,
+      name: COUNTRY_NAME.get(c.name) ?? c.name,
+      count: c.count,
+      states: [...c.children.values()]
+        .map((st) => ({
+          name: st.name,
+          count: st.count,
+          districts: [...st.children.values()]
+            .map((d) => ({ name: d.name, count: d.count, cities: leaves(d.children) }))
+            .sort(alpha),
+        }))
+        .sort(alpha),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const sorted = (set: Set<string>) => [...set].sort((a, b) => a.localeCompare(b));
+  return { tree, flat: { countries: [...flat.countries], states: sorted(flat.states), districts: sorted(flat.districts), cities: sorted(flat.cities) } };
+}
+
 /**
  * Distinct values (and age/height ranges) present in the viewer's own feed, so the app only offers filters that can match.
  *
@@ -262,14 +364,24 @@ export async function filterOptionsFor(viewerId: string) {
     return [...new Set(vals)].sort((a, b) => a.localeCompare(b));
   };
 
-  const [texts, range, total, withPhoto] = await Promise.all([
-    Promise.all(TEXT_FILTER_FIELDS.map(distinct)),
+  // The four location columns come back from one groupBy instead of four, which is both cheaper
+  // and the only way to know which districts sit under which state *in this feed*.
+  const otherFields = TEXT_FILTER_FIELDS.filter((f) => !LOCATION_FIELDS.includes(f as never));
+  const [texts, places, range, total, withPhoto] = await Promise.all([
+    Promise.all(otherFields.map(distinct)),
+    prisma.member.groupBy({ by: [...LOCATION_FIELDS], where, _count: { _all: true } }),
     prisma.member.aggregate({ where, _min: { dob: true, heightCm: true }, _max: { dob: true, heightCm: true } }),
     prisma.member.count({ where }),
     prisma.member.count({ where: { AND: [...conditions, HAS_PHOTO] } }),
   ]);
-  const [cities, maritalStatuses, educations, professions, feedDiets, communities,
-    subCommunities, states, motherTongues, familyTypes, nativePlaces, countries] = texts;
+  const byField = Object.fromEntries(otherFields.map((f, i) => [f, texts[i]])) as Record<string, string[]>;
+  const [maritalStatuses, educations, professions, feedDiets, communities,
+    subCommunities, motherTongues, familyTypes, nativePlaces] =
+    ["maritalStatus", "education", "profession", "diet", "community",
+      "subCommunity", "motherTongue", "familyType", "nativePlace"].map((f) => byField[f]);
+
+  const location = locationFacets(places);
+  const { cities, states, districts, countries } = location.flat;
 
   return {
     // ageFrom() inverts dob: the earliest date of birth in the feed is the eldest member.
@@ -278,14 +390,22 @@ export async function filterOptionsFor(viewerId: string) {
     heightMin: range._min.heightCm, heightMax: range._max.heightCm,
     cities, maritalStatuses, educations, professions, diets: dietChoices(feedDiets), communities,
     subCommunities, states, motherTongues, familyTypes, nativePlaces,
+    districts,
+    /**
+     * The same four columns as a cascade: country → state → district → city/town, with a count at
+     * every level. This is what the Location filter renders. The flat `cities`/`states`/
+     * `countries` lists above are the same values and stay for the app builds already out there.
+     */
+    locationTree: location.tree,
     countries: byCountryName(countries),
     // The name for each code above. Sent rather than looked up client-side
     // because the mobile app carries only the handful of countries whose phone
     // rules it needs, and would otherwise show a bare "DE".
     countryNames: Object.fromEntries(countries.map((c) => [c, COUNTRY_NAME.get(c) ?? c])),
-    // The ordered income ladder, so a client need not hardcode it to offer the
-    // "minimum income" filter. Not feed-derived: it is a threshold, not a set.
+    // The rupee ladder, kept for older clients. incomeRangesByCurrency is the
+    // full set: a minimum is a threshold on one ladder, not a conversion.
     incomeRanges: [...INCOME_RANGES],
+    incomeRangesByCurrency: Object.fromEntries(INCOME_CURRENCIES.map((c) => [c, [...INCOME_RANGES_BY_CURRENCY[c]]])),
     withPhoto, total,
   };
 }

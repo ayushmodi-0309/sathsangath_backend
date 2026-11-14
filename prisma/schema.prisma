@@ -58,12 +58,20 @@ model Member {
   dobIsApproximate   Boolean  @default(false) // true when only age was given (admin entry); dob is synthesised as Jul 1 of that year
   birthTime          String?  // "HH:MM", 24-hour. Horoscope data: admin only, never sent to another member.
   birthPlace         String?  // city of birth. Horoscope data: admin only, never sent to another member.
+  // "Yes" | "No". Unlike the birth time and place above, this is a matching criterion families ask
+  // about directly rather than raw horoscope data. Null means not answered, which is not the same
+  // as "No" — plenty of profiles simply leave it blank.
+  manglik            String?
   heightCm           Int?
   weightKg           Int?
   maritalStatus      String?
   community          String?
   subCommunity       String?
   city               String?
+  // India only: the district `city` sits in, and the level the feed filters on. Required for India
+  // when a member edits their own profile; cleared, with state and city, for every other country.
+  // `city` keeps meaning the town, which is usually smaller — see src/lib/locations.ts.
+  district           String?
   nativePlace        String?
   country            String   @default("IN") // ISO code of the country they live in
   religion           String   @default("Hindu")
@@ -71,9 +79,19 @@ model Member {
   education          String?
   profession         String?
   income             String?
+  // Currency of `income`. Existing rows are INR; the band is stored as written, never converted.
+  incomeCurrency     String   @default("INR")
   diet               String?
   fatherOccupation   String?
   motherOccupation   String?
+  // Brothers and sisters, and how many of each are already married. Null is "not answered"; 0 is
+  // "none", which is a different answer. See prisma/sql/add-sibling-counts.sql.
+  brothers           Int?
+  brothersMarried    Int?
+  sisters            Int?
+  sistersMarried     Int?
+  /// Deprecated: the free-text sibling box the four counts above replaced. Cleared everywhere and
+  /// no longer read or written by the API — kept one release so a deploy in either order is safe.
   siblings           String?
   familyBackground   String?
   about              String?
@@ -97,6 +115,8 @@ model Member {
   prefAgeMin         Int?
   prefAgeMax         Int?
   prefIncomeMin      String?
+  // Currency of `prefIncomeMin`. Independent of `incomeCurrency`. Existing rows are INR.
+  prefIncomeCurrency String   @default("INR")
   prefCountries      String   @default("")
   prefNotes          String?
   prefHeightMinCm    Int?
@@ -133,7 +153,7 @@ model MembershipPlan {
   id        String   @id @default(cuid())
   memberId  String
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  plan      String   // DIKRI | DIKRA | SIGNATURE (older rows may say BASIC | PRO)
+  plan      String   // DIKRI | DIKRA | DIKRA_6M | SIGNATURE (older rows may say BASIC | PRO)
   startDate DateTime
   endDate   DateTime? // optional: an open-ended membership has no end date
   note      String?

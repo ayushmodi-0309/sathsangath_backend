@@ -7,6 +7,7 @@ import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { prisma } from "../src/lib/db";
 import { nextProfileCode } from "../src/lib/util";
+import { resolveLegacyCity } from "../src/lib/locations";
 
 const PASSWORD = "Demo@1234";
 
@@ -94,6 +95,13 @@ const MEMBERS: M[] = [
   { name: "Vini Mehta", gender: "FEMALE", phone: "9100000050", age: 23, heightCm: 158, marital: "Never married", community: "Gujarati", sub: "Lohana", city: "Mumbai", state: "Maharashtra", native: "Bhavnagar", tongue: "Gujarati", family: "Nuclear", education: "Graduate", profession: "Business", income: "₹5–7 lakh", diet: "Vegetarian", father: "Businessman", mother: "Homemaker", siblings: "1 sister", about: "Manages a home decor store. Bright, outgoing, and loves interior design.", prefAge: [25, 30], prefHeight: 168, prefMarital: "Never married", relocate: "Maybe" },
 ];
 
+/** The town, district and state for a seeded city, from the closed list the API checks against. */
+function seedPlace(city: string) {
+  const place = resolveLegacyCity(city);
+  if (!place) throw new Error(`Seed city "${city}" is not in the location list — see src/lib/locations.ts`);
+  return { city: place.city, district: place.district, state: place.state };
+}
+
 async function main() {
   const hash = await bcrypt.hash(PASSWORD, 10);
   let created = 0;
@@ -143,8 +151,7 @@ async function main() {
         maritalStatus: t.marital,
         community: t.community,
         subCommunity: t.sub,
-        city: t.city,
-        state: t.state,
+        ...seedPlace(t.city),
         nativePlace: t.native,
         motherTongue: t.tongue,
         familyType: t.family,

@@ -10,6 +10,7 @@ import path from "path";
 import { prisma } from "../src/lib/db";
 import { storage, newKey } from "../src/lib/storage";
 import { nextProfileCode } from "../src/lib/util";
+import { resolveLegacyCity } from "../src/lib/locations";
 
 const PASSWORD = "Demo@1234";
 type T = {
@@ -31,6 +32,13 @@ const TEST: T[] = [
   { name: "Test Tanvi Mistry", gender: "FEMALE", phone: "9000000020", age: 27, heightCm: 154, marital: "Awaiting divorce", community: "Patel", sub: "Kadva", city: "Rajkot", state: "Gujarat", native: "Morbi", tongue: "Gujarati", family: "Joint", education: "Professional", profession: "Service", income: "₹7–10 lakh", diet: "Eggetarian", photo: "female-10.jpg", father: "Farmer", mother: "Homemaker", siblings: "2 sisters", about: "Architect working with a design studio.", prefAge: [27, 34], prefMarital: "Any", relocate: "Yes" },
 ];
 
+/** The town, district and state for a seeded city, from the closed list the API checks against. */
+function seedPlace(city: string) {
+  const place = resolveLegacyCity(city);
+  if (!place) throw new Error(`Seed city "${city}" is not in the location list — see src/lib/locations.ts`);
+  return { city: place.city, district: place.district, state: place.state };
+}
+
 async function main() {
   const hash = await bcrypt.hash(PASSWORD, 10);
   for (const t of TEST) {
@@ -44,7 +52,7 @@ async function main() {
       data: {
         profileCode: await nextProfileCode(), status: "APPROVED", approvedAt: new Date(Date.now() - Math.floor(Math.random() * 20) * 86400000), source: "ADMIN", consentGiven: true,
         fullName: t.name, phone: t.phone, email: `${t.name.split(" ")[2].toLowerCase()}.test@example.com`, gender: t.gender, dob,
-        heightCm: t.heightCm, maritalStatus: t.marital, community: t.community, subCommunity: t.sub, city: t.city, state: t.state, nativePlace: t.native,
+        heightCm: t.heightCm, maritalStatus: t.marital, community: t.community, subCommunity: t.sub, ...seedPlace(t.city), nativePlace: t.native,
         motherTongue: t.tongue, familyType: t.family, education: t.education, profession: t.profession, income: t.income, diet: t.diet,
         fatherOccupation: t.father, motherOccupation: t.mother, siblings: t.siblings, about: t.about, familyBackground: "Respectable, well-settled family with traditional values.",
         createdBy: "Parent", prefAgeMin: t.prefAge[0], prefAgeMax: t.prefAge[1], prefHeightMinCm: t.prefHeight, prefMaritalStatus: t.prefMarital ?? "Never married", prefRelocate: t.relocate,
