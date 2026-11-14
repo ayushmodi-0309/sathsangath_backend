@@ -10,7 +10,9 @@ import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
 import { rateLimit } from "express-rate-limit";
 import { removeObject, saveUpload } from "../lib/storage";
 import { checkPhone, isCountry, type CountryCode } from "../lib/phone";
-import { searchCities, verifyCity } from "../lib/cities";
+import { searchCities } from "../lib/cities";
+import { INDIA_LOCATIONS_VERSION, INDIA_STATE_LIST, districtsOf, resolveLegacyCity, resolveLocation, stateEntry, townsOf } from "../lib/locations";
+import { ALL_COUNTRIES } from "../lib/countries-data";
 import { sendSubmissionReceived } from "../lib/notify";
 import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, isIncomeBand } from "../lib/choices";
 
@@ -220,7 +222,7 @@ const intakeBase = z.object({
   manglik: manglikField,
   // Both web forms mark marital status required, so the API requires it too.
   maritalStatus: z.string().trim().min(1, "Select marital status").pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
-  community: opt, subCommunity: opt, city: opt, state: opt, nativePlace: opt,
+  community: opt, subCommunity: opt, city: opt, state: opt, district: opt, nativePlace: opt,
   education: opt, profession: opt,
   income: optionalIncome,
   incomeCurrency: optionalCurrency,
@@ -244,7 +246,7 @@ const intakeBase = z.object({
   consent: bool.refine((v) => v, "Consent is required to submit your bio data"),
 });
 
-/** Cross-field rules: the mobile numbers must be valid for their country and the city must exist in the chosen country. */
+/** Cross-field rules: the mobile numbers must be valid for their country and the place of living must be one the pickers offer. */
 export const intakeSchema = intakeBase.transform((v, ctx) => {
   // Missing currency with a band means INR. A band must sit on that currency's ladder. No conversion.
   const incomeCurrency = v.incomeCurrency ?? "INR";
@@ -267,18 +269,35 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
   if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
     ctx.addIssue({ code: "custom", path: ["prefAgeMax"], message: "The maximum age must be more than the minimum age" });
   }
-  if (v.city) {
-    const hit = verifyCity(country, v.city, v.state);
-    if (!hit) ctx.addIssue({ code: "custom", path: ["city"], message: `We could not find "${v.city}" in ${country === "IN" ? "India" : country}. Please pick your city from the suggestions.` });
-    else { out.city = hit.name; out.state = hit.state || v.state; }
+  // Place of living, resolved as one thing: see lib/locations.ts. The Google-Form webhook and the
+  // bulk imports carry a free-typed city and no district, so a city is folded onto its district
+  // rather than refused; `createSubmission` is where the website form is held to having one.
+  const place = resolveLocation(
+    v.district || !v.city ? { country, state: v.state, district: v.district, city: v.city } : (resolveLegacyCity(v.city, v.state) ?? { country, state: v.state, city: v.city }),
+  );
+  if (!place.ok) ctx.addIssue({ code: "custom", path: [place.field], message: place.message });
+  else {
+    out.state = place.value.state ?? undefined;
+    out.district = place.value.district ?? undefined;
+    out.city = place.value.city ?? undefined;
   }
   const { phoneCountry, familyPhoneCountry, ...rest } = out;
   void phoneCountry; void familyPhoneCountry;
   return { ...rest, incomeCurrency, prefIncomeCurrency, religion: "Hindu" };
 });
 
+/**
+ * True when the request itself carried a `district` field, whatever its value.
+ *
+ * This is how a client that knows about districts is told apart from one that does not, since both
+ * the web wizard and every mobile build post to the same endpoints. An empty string counts: a
+ * district-aware client that sends a blank one is asking to be told it is required.
+ */
+export const sentDistrict = (req: { body?: unknown }) =>
+  typeof (req.body as Record<string, unknown> | undefined)?.district === "string";
+
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
-export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string, dobIsApproximate?: boolean) {
+export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string; idProofUrl?: string }, accountId?: string, dobIsApproximate?: boolean, opts?: { requireDistrict?: boolean }) {
   const dupe = await prisma.member.findFirst({
     where: { OR: [{ phone: input.phone }, ...(input.email ? [{ email: input.email }] : [])] },
     select: { id: true },
@@ -298,6 +317,17 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
   // stored. The column and the serialized field stay so existing values keep displaying.
   if (rest.country && rest.country !== "IN") {
     if (source === "WEB" && !visaType) throw new HttpError(422, "Tell us which visa or status you have.", { fields: { visaType: "Choose your visa or status" } });
+  }
+  // A client that knows about districts has to supply one for India. `requireDistrict` is set by
+  // the route from whether the request carried a `district` field at all, NOT from the source:
+  // the web wizard and the mobile app post to the same endpoint, and an app build that predates
+  // the district cannot satisfy a rule it has never heard of. Those submissions come through with
+  // whatever `resolveLegacyCity` could make of the free-typed city — which is a district for about
+  // three quarters of the cities that picker offers, and nothing for the rest. Refusing the rest
+  // would be a dead end on the signup screen, so they are let through the way a profile with no
+  // city has always been.
+  if (opts?.requireDistrict && (rest.country ?? "IN") === "IN" && !rest.district) {
+    throw new HttpError(422, "Choose the district you live in.", { fields: { district: "Choose a district" } });
   }
   if (!dob) throw new HttpError(422, "Enter a date of birth or age.", { fields: { dob: "Enter a date of birth or age" } });
   const { photoUrls, ...fileFields } = files ?? {};
@@ -340,7 +370,7 @@ publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount:
   const biodataFileUrl = f?.biodata?.[0] ? await saveUpload("docs", f.biodata[0]) : undefined;
   const idProofUrl = f?.idproof?.[0] ? await saveUpload("docs", f.idproof[0]) : undefined;
   let m;
-  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl, idProofUrl }); }
+  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl, idProofUrl }, undefined, undefined, { requireDistrict: sentDistrict(req) }); }
   catch (e) { await Promise.all([removeObject(photoUrl), removeObject(biodataFileUrl), removeObject(idProofUrl)]); throw e; } // e.g. duplicate phone: don't orphan files
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
@@ -352,11 +382,55 @@ publicRouter.post("/intake-webhook", wrap(async (req, res) => {
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
 
-// City suggestions for the bio data form (and the mobile apps): ?country=IN&q=ahm
 const geoLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please slow down." } });
+
+/**
+ * City suggestions: ?country=IN&q=ahm
+ *
+ * LEGACY. The place of living is a closed cascade now — see /locations below — but the app builds
+ * already in people's hands drive their city picker off this endpoint, and both the web form and
+ * the app still use it for the native place (vatan), which stays free text. Keep it.
+ */
 publicRouter.get("/cities", geoLimiter, wrap(async (req, res) => {
   const { country, q } = z.object({ country: countryField, q: z.string().trim().default("") }).parse(req.query);
   res.json(searchCities(country as CountryCode, q, 10));
+}));
+
+/**
+ * The place-of-living lists: every country, and for India the state → district → city/town tree.
+ *
+ * Served rather than bundled so the mobile app picks up a data refresh — a district renamed, a new
+ * one carved out — without waiting for a store release. Cached for a day and tagged with the data
+ * version, so a client that already has the current tree gets a 304.
+ *
+ *   /locations                    countries + India's states and districts (no towns)
+ *   /locations?state=GJ           that state's districts, each with its towns
+ *   /locations?full=1             everything, towns included (~400 KB)
+ */
+publicRouter.get("/locations", geoLimiter, wrap(async (req, res) => {
+  const { state, full } = z.object({
+    state: z.string().trim().max(60).optional(),
+    full: z.enum(["1", "true"]).optional(),
+  }).parse(req.query);
+
+  const districtsFor = (s: { code: string; name: string }, withTowns: boolean) =>
+    districtsOf(s.code).map((district) => ({
+      district,
+      ...(withTowns ? { towns: townsOf(s.code, district) } : {}),
+    }));
+
+  const one = state ? stateEntry(state) : null;
+  if (state && !one) throw new HttpError(404, "No such Indian state or union territory.");
+
+  const states = one ? [one] : INDIA_STATE_LIST;
+  const body = {
+    version: INDIA_LOCATIONS_VERSION,
+    countries: ALL_COUNTRIES.map(([code, name]) => ({ code, name })),
+    india: states.map((s) => ({ code: s.code, name: s.name, districts: districtsFor(s, Boolean(one) || Boolean(full)) })),
+  };
+  res.set("Cache-Control", "public, max-age=86400");
+  res.set("ETag", `W/"geo-${INDIA_LOCATIONS_VERSION}-${state ?? (full ? "full" : "admin")}"`);
+  res.json(body);
 }));
 
 publicRouter.get("/tags", wrap(async (_req, res) => {

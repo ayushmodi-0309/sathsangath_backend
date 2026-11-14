@@ -21,7 +21,7 @@ const photoOrder = [{ isMain: "desc" as const }, { createdAt: "asc" as const }];
  */
 const publicFields = {
   id: true, profileCode: true, gender: true, dob: true, heightCm: true, weightKg: true,
-  maritalStatus: true, manglik: true, community: true, subCommunity: true, city: true, state: true,
+  maritalStatus: true, manglik: true, community: true, subCommunity: true, city: true, state: true, district: true,
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
   brothers: true, brothersMarried: true, sisters: true, sistersMarried: true,
   familyBackground: true, about: true, photoUrl: true, motherTongue: true,
@@ -106,6 +106,8 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     subCommunity: m.subCommunity,
     city: m.city,
     state: m.state,
+    // India only, and public like the city already is: the feed filters on it.
+    district: m.district,
     education: m.education,
     profession: m.profession,
     diet: m.diet,
@@ -232,7 +234,7 @@ export async function toSelf(m: FullMember) {
  */
 export const adminListSelect = {
   id: true, profileCode: true, fullName: true, phone: true, email: true, gender: true, dob: true,
-  status: true, city: true, community: true, education: true, profession: true, createdAt: true, source: true,
+  status: true, city: true, district: true, community: true, education: true, profession: true, createdAt: true, source: true,
   membershipPlans: {
     select: { id: true, plan: true, startDate: true, endDate: true, note: true },
     orderBy: { startDate: "desc" as const },

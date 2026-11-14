@@ -19,7 +19,9 @@
     "visa:normalize": "tsx scripts/normalize-visa-types.ts",
     "lists:reset": "tsx scripts/reset-education-profession.ts",
     "photos:fix-main": "tsx scripts/fix-main-photos.ts",
-    "egress:check": "tsx scripts/egress-check.ts"
+    "egress:check": "tsx scripts/egress-check.ts",
+    "locations:generate": "tsx scripts/generate-india-locations.ts",
+    "locations:normalize": "tsx scripts/normalize-locations.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1146.0",

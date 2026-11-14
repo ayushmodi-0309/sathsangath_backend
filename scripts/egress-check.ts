@@ -18,8 +18,8 @@ import { adminListSelect, toAdminListItem } from "../src/lib/serializers";
 const kb = (v: unknown) => `${(Buffer.byteLength(JSON.stringify(v)) / 1024).toFixed(1)} KB`;
 
 async function report(viewerId: string, label: string) {
-  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { profileCode: true, city: true, gender: true } });
-  console.log(`\n=== ${label}: ${viewer.profileCode}, ${viewer.gender}, city ${viewer.city ?? "(none set)"} ===`);
+  const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { profileCode: true, city: true, district: true, gender: true } });
+  console.log(`\n=== ${label}: ${viewer.profileCode}, ${viewer.gender}, ${[viewer.city, viewer.district].filter(Boolean).join(" / ") || "(no place set)"} ===`);
   const mutual = await mutualIds(viewerId);
 
   const first = await feedPage(viewerId, {}, 1, 12, mutual);
@@ -62,17 +62,22 @@ async function report(viewerId: string, label: string) {
     console.log(`  age edges                        -> ${ok ? "inclusive, and the full range matches everyone" : `CHECK: youngest=${onlyYoungest.total}, eldest=${onlyEldest.total}, whole range=${whole.total} of ${opts.total}`}`);
   }
 
-  // `nearby` must agree exactly with filtering on the viewer's own city.
-  // Checked separately because a viewer with no city makes it trivially empty,
-  // which looks the same as a broken condition.
-  if (viewer.city?.trim()) {
-    const [near, byCity] = await Promise.all([
+  // `nearby` must agree exactly with filtering on the viewer's own district — two families in
+  // Kadi and Unjha are neighbours, and only the district says so. It falls back to the city for a
+  // viewer whose district has not been filled in yet, so both are checked against the right one.
+  // Checked separately because a viewer with neither makes it trivially empty, which looks the
+  // same as a broken condition.
+  const own = viewer.district?.trim() ? { label: `district=${viewer.district.trim()}`, filter: { district: [viewer.district.trim()] } }
+    : viewer.city?.trim() ? { label: `city=${viewer.city.trim()} (no district yet)`, filter: { city: [viewer.city.trim()] } }
+    : null;
+  if (own) {
+    const [near, byOwn] = await Promise.all([
       feedPage(viewerId, { nearby: true }, 1, 1, mutual),
-      feedPage(viewerId, { city: [viewer.city] }, 1, 1, mutual),
+      feedPage(viewerId, own.filter, 1, 1, mutual),
     ]);
-    console.log(`  nearby vs city=${viewer.city.padEnd(20)} -> ${near.total === byCity.total ? `agree (${near.total})` : `CHECK: nearby=${near.total}, city filter=${byCity.total}`}`);
+    console.log(`  nearby vs ${own.label.padEnd(25)} -> ${near.total === byOwn.total ? `agree (${near.total})` : `CHECK: nearby=${near.total}, same filter=${byOwn.total}`}`);
   } else {
-    console.log(`  nearby                           -> not checked: this viewer has no city set, so it is empty by definition`);
+    console.log(`  nearby                           -> not checked: this viewer has no district or city set, so it is empty by definition`);
   }
 
   // "Just joined" is approvedAt within 14 days. If everyone matches, check

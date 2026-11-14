@@ -9,6 +9,7 @@ import { isOwner, normaliseRole, OWNER_ROLE, requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { adminListSelect, toAdminListItem, toAdminMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
+import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { audit, tempPassword } from "../lib/util";
 import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
@@ -59,6 +60,7 @@ const listQuery = z.object({
   incomeCurrency: z.string().optional(),
   diet: z.string().optional(),
   state: z.string().optional(),
+  district: z.string().optional(),
   country: z.string().optional(),
   nativePlace: z.string().optional(),
   birthPlace: z.string().optional(),
@@ -75,7 +77,7 @@ const listQuery = z.object({
   plan: z.enum(["FREE", "DIKRI", "DIKRA", "DIKRA_6M", "SIGNATURE", "BASIC", "PRO"]).optional(),
   // pagination + sort
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20),
-  sort: z.enum(["profileCode","fullName","dob","city","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
+  sort: z.enum(["profileCode","fullName","dob","city","district","community","status","createdAt","maritalStatus","heightCm","education","profession","state","country","religion","motherTongue","familyType","source"]).default("createdAt"),
   order: z.enum(["asc","desc"]).default("desc"),
 });
 
@@ -83,7 +85,7 @@ const listQuery = z.object({
 function applyMultiContains(
   w: Prisma.MemberWhereInput,
   and: Prisma.MemberWhereInput[],
-  field: "city" | "community" | "subCommunity" | "education" | "profession",
+  field: "city" | "district" | "community" | "subCommunity" | "education" | "profession",
   raw?: string,
 ) {
   if (!raw) return;
@@ -105,6 +107,7 @@ function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
   if (q.status) w.status = q.status;
   if (q.gender) w.gender = q.gender;
   applyMultiContains(w, and, "city", q.city);
+  applyMultiContains(w, and, "district", q.district);
   applyMultiContains(w, and, "community", q.community);
   applyMultiContains(w, and, "subCommunity", q.subCommunity);
   if (q.tag) w.tags = { some: { tagValueId: q.tag } };
@@ -330,7 +333,11 @@ const editSchema = z.object({
   maritalStatus: z.string().trim().pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
   manglik: manglikClearable,
-  community: clearableText, subCommunity: clearableText, city: clearableText, state: clearableText,
+  community: clearableText, subCommunity: clearableText,
+  // Place of living. These four are not written straight through: locationPatch() resolves them
+  // together against lib/locations.ts, so the office cannot put a town back into the feed facets
+  // that the member pickers do not offer.
+  city: clearableText, state: clearableText, district: clearableText,
   education: clearableText, profession: clearableText,
   income: clearableIncome, incomeCurrency: optionalCurrency, diet: clearableChoice(DIETS),
   fatherOccupation: clearableText, motherOccupation: clearableText,
@@ -365,6 +372,49 @@ const editSchema = z.object({
  */
 const visaExpiryValue = (_v: string | null | undefined): Date | null | undefined => undefined;
 
+/**
+ * The place-of-living columns an admin edit should write, resolved as one thing.
+ *
+ * Both admin routes used to pass `city` and `state` straight into the update, which made the
+ * office the one hole through which an off-list town could reach the column — and the feed facets
+ * are built from those columns, so it would come back as a filter chip. Everything now goes
+ * through the same resolver the member and intake paths use.
+ *
+ * The PATCH route carries no country, so the stored one is used; it is never assumed to be India.
+ * Admin entry is deliberately lenient about a missing district: the office often has only the city
+ * to go on, and a half-filled profile is still worth saving.
+ */
+async function locationPatch(
+  id: string,
+  sent: { country?: string; state?: string | null; district?: string | null; city?: string | null },
+) {
+  const touched = sent.country !== undefined || sent.state !== undefined || sent.district !== undefined || sent.city !== undefined;
+  if (!touched) return {};
+  const stored = await prisma.member.findUniqueOrThrow({
+    where: { id },
+    select: { country: true, state: true, district: true, city: true },
+  });
+  const nextCountry = (sent.country ?? stored.country ?? "IN").trim() || "IN";
+  const countryChanged = sent.country !== undefined && nextCountry !== (stored.country || "IN");
+  const carried = <T>(value: T | undefined, fallback: T | null) => (value !== undefined ? value : countryChanged ? null : fallback);
+  let input = {
+    country: nextCountry,
+    state: carried(sent.state, stored.state),
+    district: carried(sent.district, stored.district),
+    city: carried(sent.city, stored.city),
+  };
+  // A city sent without a district — the office typing one in, or a row imported before the list
+  // existed. The city is then the only statement being made about where they live, so it decides
+  // the district rather than deferring to whatever is already stored.
+  if (sent.district === undefined && (sent.city !== undefined || !input.district) && input.city) {
+    const legacy = resolveLegacyCity(input.city, input.state);
+    if (legacy) input = { ...input, state: legacy.state, district: legacy.district, city: legacy.city };
+  }
+  const place = resolveLocation(input);
+  if (!place.ok) throw new HttpError(422, place.message, { fields: { [place.field]: place.message } });
+  return { state: place.value.state, district: place.value.district, city: place.value.city };
+}
+
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const id = pid(req.params.id);
   const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = editSchema.parse(req.body);
@@ -391,10 +441,12 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     if (!r.ok) throw new HttpError(422, r.error, { fields: { [field]: r.error } });
     d[field] = r.value;
   }
+  const place = await locationPatch(id, { state: d.state, district: d.district, city: d.city });
   const m = await prisma.member.update({
     where: { id },
     data: {
       ...d,
+      ...place,
       ...incomePatch.patch,
       ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
       ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
@@ -481,6 +533,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
       where: { id },
       data: {
         ...d,
+        ...(await locationPatch(id, { country, state: d.state, district: d.district, city: d.city })),
         ...incomePatch.patch,
         ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
         ...(dob !== undefined && { dob: new Date(dob) }),

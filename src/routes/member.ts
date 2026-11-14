@@ -9,8 +9,8 @@ import { mutualSelect, toMutualProfile, toPublicProfile, toSelf, type MutualMemb
 import { learnTagValuesFor } from "../lib/tags";
 import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { activity, list, memberLabel } from "../lib/util";
-import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
-import { verifyCity } from "../lib/cities";
+import { checkAnyPhone, isPlaceholderPhone } from "../lib/phone";
+import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
 import { checkSiblingCounts, ID_PROOF_TYPES, manglikClearable, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
@@ -124,7 +124,10 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     // sends it is unaffected.
     manglik: manglikClearable,
     community: str, subCommunity: str,
-    city: clearable, state: clearable, nativePlace: str,
+    // Place of living, a closed cascade: see lib/locations.ts. "" clears, a missing key leaves it
+    // alone. An app build that predates the district still sends only city + state; its city is
+    // resolved to a district server-side rather than refused.
+    city: clearable, state: clearable, district: clearable, nativePlace: str,
     // Where they live. Any non-empty text is kept, so a country we do not list still saves.
     country: z.string().trim().min(1).max(100).optional(),
     visaType: clearable, visaExpiry: clearable,
@@ -156,7 +159,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     prefCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
   // Closed lists. A key that was not sent stays untouched; "" still clears the field.
   if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
   if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
@@ -186,35 +189,46 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   const nextCountry = (country ?? member.country ?? "IN").trim() || "IN";
   const countryChanged = country !== undefined && nextCountry !== (member.country || "IN");
 
-  // A city belongs to a country. Changing country drops a city that was never
-  // re-picked; a city that was sent is checked against the country being saved.
-  let resolvedCity = city, resolvedState = state;
-  const cityToCheck = city !== undefined ? city : (countryChanged ? member.city : undefined);
-  const stateToCheck = state !== undefined ? state : (countryChanged ? member.state ?? undefined : undefined);
-  if (cityToCheck) {
-    if (isCountry(nextCountry)) {
-      const hit = verifyCity(nextCountry, cityToCheck, stateToCheck ?? undefined);
-      if (!hit) {
-        if (city !== undefined) throw new HttpError(422, `We could not find "${cityToCheck}". Please pick a city from the suggestions.`, { fields: { city: `"${cityToCheck}" was not found in our city list.` } });
-        resolvedCity = null; resolvedState = null;
-      } else if (city !== undefined || countryChanged) {
-        resolvedCity = hit.name; resolvedState = hit.state || stateToCheck;
-      }
-    } else if (city !== undefined) {
-      resolvedCity = city;
-      if (state !== undefined) resolvedState = state;
-    } else if (countryChanged) {
-      resolvedCity = null; resolvedState = null;
-    }
-  } else if (city === null || (countryChanged && city === undefined)) {
-    resolvedCity = null;
-    if (state === undefined || state === null) resolvedState = null;
-  }
-
+  // Place of living is resolved as one thing, not field by field: the state, district and town have
+  // to agree with each other and with the country, and outside India there is nothing below the
+  // country to keep. Moving country drops whatever was stored below it rather than carrying a city
+  // into a country it does not belong to; only values sent in this request are kept.
+  const touchedPlace = country !== undefined || state !== undefined || district !== undefined || city !== undefined;
   const data: Record<string, unknown> = { ...rest, ...incomePatch.patch };
   if (country !== undefined) data.country = nextCountry;
-  if (resolvedCity !== undefined) data.city = resolvedCity;
-  if (resolvedState !== undefined) data.state = resolvedState;
+
+  if (touchedPlace) {
+    const carried = <T>(sent: T | undefined, stored: T | null) => (sent !== undefined ? sent : countryChanged ? null : stored);
+    let input = {
+      country: nextCountry,
+      state: carried(state, member.state),
+      district: carried(district, member.district),
+      city: carried(city, member.city),
+    };
+    // An app build that has never heard of districts sends a free-typed city and no district. The
+    // city it sent is then the only thing it is actually telling us about where they live, so it
+    // decides the district — the stored one may well be what they are moving away from. The
+    // district is filled in rather than the save refused, the same choice closed-lists.ts makes
+    // for education.
+    if (district === undefined && city !== undefined && input.city) {
+      const legacy = resolveLegacyCity(input.city, input.state);
+      if (legacy) input = { ...input, state: legacy.state, district: legacy.district, city: legacy.city };
+    }
+    // A client that knows about districts has to supply one for India — clearing it is refused —
+    // while one that does not send the key at all is left to the legacy path above.
+    let place = resolveLocation(input, { requireDistrict: district !== undefined });
+    // ...and it must never be refused *because of* a district it cannot send. That happens when the
+    // city it sent could not be resolved and the state it sent is not the stored district's state —
+    // somebody on an old build moving from Ahilyanagar to a Gujarat village. Drop the stale
+    // district instead of rejecting the save; they keep the city and state they actually sent.
+    if (!place.ok && district === undefined && place.field === "district") {
+      place = resolveLocation({ ...input, district: null });
+    }
+    if (!place.ok) throw new HttpError(422, place.message, { fields: { [place.field]: place.message } });
+    data.state = place.value.state;
+    data.district = place.value.district;
+    data.city = place.value.city;
+  }
 
   // Visa is part of living outside India. India clears it. Anywhere else, the
   // status is required. The expiry date is retired — see the note below.
@@ -362,7 +376,7 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
     page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(12),
     ageMin: num, ageMax: num, heightMin: num, heightMax: num,
     city: csv, maritalStatus: csv, education: csv, profession: csv, diet: csv, community: csv,
-    subCommunity: csv, state: csv, motherTongue: csv, familyType: csv, nativePlace: csv,
+    subCommunity: csv, state: csv, district: csv, motherTongue: csv, familyType: csv, nativePlace: csv,
     country: csv,
     // One band from that currency's ladder. Omitted currency means INR. An unknown pair is ignored.
     incomeMin: z.string().trim().max(40).optional(),
@@ -370,6 +384,8 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
     hasPhoto: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     justJoined: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
     nearby: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
+    // "Indian" or "NRI": living in India, or living anywhere else.
+    residence: z.enum(["india", "nri"]).optional(),
     code: z.string().trim().max(20).optional(),
     sort: z.enum(["new", "ageAsc", "ageDesc", "heightAsc", "heightDesc"]).optional(),
   }).parse(req.query);

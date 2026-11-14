@@ -4,6 +4,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
+import { resolveLegacyCity } from "../src/lib/locations";
 
 const prisma = new PrismaClient();
 const PHOTO_SRC = path.join(__dirname, "seed-photos");
@@ -45,6 +46,16 @@ const people: P[] = [
   [1020, "FEMALE", "Khushi Joshi", "Brahmin", "Rajkot", 25, "Graduate", "Service", "female-12.jpg", "APPROVED"],
 ];
 
+/**
+ * The place of living for a seeded demo row: the town, its district and its state, from the same
+ * closed list the API checks against. A city this cannot place would be a bug in the seed data.
+ */
+function seedPlace(city: string) {
+  const place = resolveLegacyCity(city);
+  if (!place) throw new Error(`Seed city "${city}" is not in the location list — see src/lib/locations.ts`);
+  return { city: place.city, district: place.district, state: place.state };
+}
+
 /** Copies a sample portrait into the uploads folder under an unguessable name and returns its public URL. */
 function addPhoto(file: string) {
   fs.mkdirSync(PHOTO_DST, { recursive: true });
@@ -84,7 +95,10 @@ async function main() {
         data: {
           profileCode: `SS-${n}`, status, approvedAt: approved ? new Date() : null, source: approved ? "ADMIN" : "WEB", consentGiven: true,
           fullName, phone, email: `${fullName.split(" ")[0].toLowerCase()}${n}@example.com`, familyPhone: `98000000${String(n - 1000).padStart(2, "0")}`, gender, dob,
-          heightCm: gender === "MALE" ? 170 + (n % 9) : 154 + (n % 9), maritalStatus: "Never married", community, city, state: city === "Mumbai" ? "Maharashtra" : "Gujarat",
+          heightCm: gender === "MALE" ? 170 + (n % 9) : 154 + (n % 9), maritalStatus: "Never married", community,
+          // The demo city is run through the same resolver the API uses, so seeded
+          // rows carry a real district and state rather than a guessed one.
+          ...seedPlace(city),
           education, profession, diet: "Vegetarian", fatherOccupation: "Business", motherOccupation: "Homemaker", siblings: n % 2 ? "1 brother" : "1 sister",
           familyBackground: "A close-knit, traditional family that values education and togetherness.",
           about: "Family-oriented, balanced and looking for a caring life partner.",

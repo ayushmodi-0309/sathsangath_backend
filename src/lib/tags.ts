@@ -27,8 +27,14 @@ import { prisma } from "./db";
 export const TAG_FIELD_CATEGORIES = {
   community: "Community",
   subCommunity: "Sub-community",
-  city: "City",
+  // `city` used to be learned here. It is now the town level of the closed Country → State →
+  // District → City/Town list in lib/locations.ts, for the reason given above: the feed facets are
+  // built from the member rows, so a free-typed town reappears as a filter chip. The existing
+  // "City" TagCategory rows are deliberately left in place — the shipped app builds still read
+  // them from GET /public/tags — they simply stop growing.
   motherTongue: "Mother tongue",
+  // Birth place stays open: it is horoscope data, not a filter, and a birth village is often in no
+  // list at all.
   birthPlace: "Birth Place",
 } as const;
 

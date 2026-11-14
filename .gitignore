@@ -5,3 +5,6 @@ prisma/dev.db*
 uploads/*
 !uploads/.gitkeep
 email-previews
+
+# Generated-data cache for scripts/generate-india-locations.ts
+.cache

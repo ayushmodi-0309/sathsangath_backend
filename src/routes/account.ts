@@ -7,7 +7,7 @@ import { includeTags } from "../lib/matching";
 import { toSelf } from "../lib/serializers";
 import { z } from "zod";
 import { newScopedKey, ownsKey, removeObject, saveUpload, storage } from "../lib/storage";
-import { createSubmission, intakeSchema, MAX_PHOTO_BYTES, upload } from "./public";
+import { createSubmission, intakeSchema, MAX_PHOTO_BYTES, sentDistrict, upload } from "./public";
 
 /**
  * Direct-to-storage uploads.
@@ -130,7 +130,7 @@ accountRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount
     : f?.idproof?.[0] ? await saveUpload("docs", f.idproof[0]) : undefined;
 
   let m;
-  try { m = await createSubmission(input, "WEB", { photoUrls, biodataFileUrl, idProofUrl }, account.id); }
+  try { m = await createSubmission(input, "WEB", { photoUrls, biodataFileUrl, idProofUrl }, account.id, undefined, { requireDistrict: sentDistrict(req) }); }
   catch (e) { await Promise.all([...photoUrls.map((u) => removeObject(u)), removeObject(biodataFileUrl), removeObject(idProofUrl)]); throw e; }
   res.status(201).json({ ok: true, reference: m.profileCode, token: signToken({ kind: "member", id: m.id }) });
 }));
