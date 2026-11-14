@@ -25,7 +25,7 @@ const publicFields = {
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
   brothers: true, brothersMarried: true, sisters: true, sistersMarried: true,
   familyBackground: true, about: true, photoUrl: true, motherTongue: true,
-  familyType: true, nativePlace: true, country: true, visaType: true, visaExpiry: true, approvedAt: true,
+  familyType: true, nativePlace: true, country: true, visaType: true, approvedAt: true,
 } satisfies Prisma.MemberSelect;
 
 /**
@@ -78,11 +78,12 @@ const toPhotos = (m: { photos: Photo[] }) => {
 };
 
 /**
- * PRIVACY: this is the ONLY shape another member ever receives.
+ * PRIVACY: this is the base shape every other member receives.
  * Name, phone, email, family contacts, DOB and the original document are never included —
- * masking happens here on the server, not with CSS. Nothing unlocks a contact
- * detail for another member: not a mutual like, not a facilitated
- * introduction. Only the member themselves and the admin see those.
+ * masking happens here on the server, not with CSS. Nothing in this shape, and nothing a member
+ * can do on their own, unlocks a contact detail: not a mutual like, not a facilitated
+ * introduction. Only our team hands one over, by approving a mutual pair for contact sharing or
+ * by suggesting a profile to a member — both are added in the member route, never here.
  *
  * birthTime and birthPlace are horoscope data and are admin-only: they appear in
  * toAdminMember and in no member-facing shape, not even toSelf. Do not add them here.
@@ -124,14 +125,18 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     motherTongue: m.motherTongue,
     familyType: m.familyType,
     nativePlace: m.nativePlace, // public: members can filter by it
-    // Where they live and, if that is outside India, the kind of visa or
-    // status they hold and when it runs out. All three are public: they are
-    // the first thing a family asks and they already filter on country, so
-    // withholding them until a mutual like only made people ask us instead.
-    // The ID document itself is never sent to another member.
+    // Where they live and, if that is outside India, the kind of visa or status
+    // they hold. Both are public: they are the first thing a family asks and
+    // they already filter on country, so withholding them until a mutual like
+    // only made people ask us instead.
+    //
+    // The expiry DATE is not here and must not be added. It is retired as an
+    // input (see routes/admin.ts) and the privacy policy promises it is never
+    // shown to any member — it used to go out in this shape, at the public
+    // tier, which is what the tiers check caught. The ID document itself is
+    // never sent to another member either.
     country: m.country,
     visaType: m.visaType,
-    visaExpiry: m.visaExpiry,
     // Other members see only the main photo until both have liked each other.
     photos: await toPhotos(allPhotos ? m : { ...m, photos: mainOnly(m.photos) }),
   };
@@ -160,13 +165,15 @@ export const toMutualProfile = async (m: MutualMember) => ({
 });
 
 /*
- * There is deliberately no member-facing shape that carries contact details.
+ * No shape in this file carries contact details to another member, and none should.
  *
- * An arranged introduction does NOT reveal a phone number or an email address:
- * our team passes those between the families themselves. Only the member
- * (toSelf) and the admin (toAdminMember) ever see them. This used to be a
- * toContactProfile() that unlocked after an introduction was facilitated —
- * if you are looking for it, that was the bug, and it is gone.
+ * A like, a mutual like and an arranged introduction all reveal nothing: our team passes the
+ * numbers between the families themselves. The two cases where a member does see another's name,
+ * mobile number and email are both our team's own decision, taken per pair in the admin panel —
+ * an approved ContactShare on a mutual pair, and a profile our team suggested to that member —
+ * and both are assembled in routes/member.ts (mutualView / suggestedView) on top of these shapes.
+ * There used to be a toContactProfile() here that unlocked on a facilitated introduction, with no
+ * human in the loop at all — if you are looking for it, that was the bug, and it is gone.
  */
 
 /**

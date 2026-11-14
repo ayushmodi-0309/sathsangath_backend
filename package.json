@@ -20,6 +20,7 @@
     "lists:reset": "tsx scripts/reset-education-profession.ts",
     "photos:fix-main": "tsx scripts/fix-main-photos.ts",
     "egress:check": "tsx scripts/egress-check.ts",
+    "tiers:check": "tsx scripts/visibility-tiers-check.ts",
     "locations:generate": "tsx scripts/generate-india-locations.ts",
     "locations:normalize": "tsx scripts/normalize-locations.ts"
   },
