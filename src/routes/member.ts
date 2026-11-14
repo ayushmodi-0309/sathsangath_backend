@@ -38,8 +38,44 @@ const me = (req: { actor?: { id: string } }) => req.actor!.id;
  */
 const notifySelect = { id: true, fullName: true, profileCode: true, phone: true, email: true, fcmToken: true } satisfies Prisma.MemberSelect;
 const loadMe = (id: string) => prisma.member.findUniqueOrThrow({ where: { id }, include: includeTags });
-/** A mutual-match profile. The name is added only for members whose contact sharing our team has approved. */
-const mutualView = async (m: MutualMember, shared: Set<string>) => ({ ...(await toMutualProfile(m)), ...(shared.has(m.id) ? { fullName: m.fullName } : {}) });
+/**
+ * A mutual-match profile in a list.
+ *
+ * The name, mobile number and email are added only for pairs our team has approved for contact
+ * sharing — and all three together. A list used to hand over the name while withholding the
+ * number, so the same pair read as two different tiers depending on which screen you were on.
+ */
+const mutualView = async (m: MutualMember, shared: Set<string>) => {
+  const approved = shared.has(m.id);
+  return {
+    ...(await toMutualProfile(m)),
+    contactApproved: approved,
+    contact: approved ? contactOf(m) : null,
+    ...(approved ? { fullName: m.fullName } : {}),
+  };
+};
+
+/** Mobile number and email as a member-facing pair. A placeholder phone goes out as nothing. */
+const contactOf = (m: { phone: string; email: string | null }) => ({ phone: isPlaceholderPhone(m.phone) ? null : m.phone, email: m.email });
+
+/**
+ * A profile OUR TEAM suggested to this viewer ("Suggested by Sathsangath").
+ *
+ * It is shown in full — every photo, date of birth, religion, parents' names, income, partner
+ * preferences — and, unlike every other member-facing shape, with the name, mobile number and
+ * email as well. A suggestion is the team hand-picking this profile for this member, which is
+ * the same decision a ContactShare records for a mutual pair, so it carries its own approval and
+ * nothing further has to be unlocked. Removing the suggestion takes the access away again.
+ *
+ * The reveal is one-directional: it is the suggested profile that the viewer sees in full. The
+ * other member is told nothing and sees nothing of this viewer until they are a mutual match.
+ */
+const suggestedView = async (m: MutualMember) => ({
+  ...(await toMutualProfile(m)),
+  fullName: m.fullName,
+  contactApproved: true,
+  contact: contactOf(m),
+});
 
 const who = (m: { id: string; profileCode: string; fullName: string }) => ({ type: "MEMBER" as const, memberId: m.id, name: memberLabel(m) });
 
@@ -399,9 +435,25 @@ memberRouter.get("/matches", requireApproved, wrap(async (req, res) => {
   // so feedPage() excludes them and every item here is a non-mutual profile.
   const { items, total } = await feedPage(me(req), filters, q.page, q.pageSize, mutual);
   const liked = new Set(likes.map((l) => l.likedId));
+  /**
+   * A profile our team suggested reads the same on every screen, the feed included: the page is
+   * fetched in the short shape for egress, so the few suggested rows on it — normally none or
+   * one — are read again in full and serialized through suggestedView. Without this a suggested
+   * card was a tier-1 card until the member opened it, which is a second answer to the same
+   * question about the same pair.
+   */
+  const onPage = items.filter((m) => suggested.has(m.id)).map((m) => m.id);
+  const full = onPage.length
+    ? new Map((await prisma.member.findMany({ where: { id: { in: onPage } }, select: mutualSelect })).map((m) => [m.id, m]))
+    : new Map<string, MutualMember>();
   res.json({
     total, page: q.page, pageSize: q.pageSize,
-    items: await Promise.all(items.map(async (m) => ({ ...(await toPublicProfile(m)), liked: liked.has(m.id), mutual: false, suggested: suggested.has(m.id) }))),
+    items: await Promise.all(items.map(async (m) => {
+      const sug = full.get(m.id);
+      return sug
+        ? { ...(await suggestedView(sug)), liked: liked.has(m.id), mutual: false, suggested: true }
+        : { ...(await toPublicProfile(m)), liked: liked.has(m.id), mutual: false, suggested: false };
+    })),
   });
 }));
 
@@ -409,10 +461,14 @@ memberRouter.get("/matches/filter-options", requireApproved, wrap(async (req, re
   res.json(await filterOptionsFor(me(req)));
 }));
 
-/** A profile can be opened if it is in the viewer's curated feed, or if the two members liked each other. */
-async function loadVisible(viewerId: string, profileId: string) {
-  const isMutual = (await mutualIds(viewerId)).has(profileId);
-  const p = await visibleProfile(viewerId, profileId, isMutual);
+/** A profile can be opened if it is in the viewer's curated feed, if the two members liked each other, or if our team suggested it. */
+async function loadVisible(viewerId: string, profileId: string, isSuggested?: boolean) {
+  const [isMutual, suggested] = await Promise.all([
+    mutualIds(viewerId).then((ids) => ids.has(profileId)),
+    // The caller passes what it already knows; otherwise it is one lookup here.
+    isSuggested ?? prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId, profileId } }, select: { id: true } }).then((r) => !!r),
+  ]);
+  const p = await visibleProfile(viewerId, profileId, isMutual || suggested);
   if (!p) throw new HttpError(404, "This profile is not available.");
   return { p, isMutual };
 }
@@ -433,31 +489,35 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   let p: Awaited<ReturnType<typeof loadVisible>>["p"];
   let isMutual: boolean;
   const isSelf = viewerId === profileId;
+  // Looked up before the profile itself: a suggestion is what makes it openable
+  // even when our team has hidden it from this viewer's feed since.
+  const sug = isSelf ? null : await prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId, profileId } } });
+  const isSuggested = !!sug;
   if (isSelf) {
     const row = await prisma.member.findFirst({ where: { id: profileId }, select: mutualSelect });
     if (!row) throw new HttpError(404, "This profile is not available.");
     p = row;
     isMutual = false;
   } else {
-    ({ p, isMutual } = await loadVisible(viewerId, profileId));
+    ({ p, isMutual } = await loadVisible(viewerId, profileId, isSuggested));
   }
-  const [like, introByMe, introByThem, sug] = await Promise.all([
+  const [like, introByMe, introByThem] = await Promise.all([
     prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: p.id, targetId: me(req) } } }),
-    prisma.suggestion.findUnique({ where: { viewerId_profileId: { viewerId: me(req), profileId: p.id } } }),
   ]);
   const activeIntro = introByMe ?? introByThem;
   // A facilitated introduction unlocks nothing here: our team passes the
-  // numbers between the families. No member-facing shape carries a phone or
-  // an email, so there is no branch for it.
-  const revealFull = isMutual || isSelf;
+  // numbers between the families. What our team suggesting the profile unlocks
+  // is in suggestedView — that is the team's own decision, not an automatic one.
+  const revealFull = isMutual || isSelf || isSuggested;
   const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
-  // Mobile number and email only after our team approves this pair (admin: Likes & requests, Mutual likes).
-  const contactApproved = isMutual && !isSelf && (await isContactShared(viewerId, p.id));
+  // Mobile number and email after our team approves this pair (admin: Likes & requests,
+  // Mutual likes), or straight away on a profile our team suggested to this member.
+  const contactApproved = !isSelf && (isSuggested || (isMutual && (await isContactShared(viewerId, p.id))));
   res.json({
     ...serialized,
-    ...(isMutual && !isSelf ? { contactApproved, contact: contactApproved ? { phone: isPlaceholderPhone(p.phone) ? null : p.phone, email: p.email } : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
+    ...(!isSelf && (isMutual || isSuggested) ? { contactApproved, contact: contactApproved ? contactOf(p) : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
     liked: isSelf ? false : !!like,
     mutual: isMutual,
     suggested: isSelf ? false : !!sug,
@@ -532,13 +592,17 @@ memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
 
 memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
   const shared = await sharedWith(me(req));
-  const [likes, mutual] = await Promise.all([
+  const [likes, mutual, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
+    suggestionsFor(me(req)),
   ]);
   res.json(await Promise.all(likes.map(async (l) => {
-    const isMutual = mutual.has(l.likerId);
-    return { ...(await (isMutual ? mutualView(l.liker, shared) : toPublicProfile(l.liker))), liked: isMutual, mutual: isMutual, likedAt: l.createdAt };
+    const isMutual = mutual.has(l.likerId); const isSuggested = suggested.has(l.likerId);
+    // A profile our team suggested reads the same wherever it is listed, so the
+    // suggested shape wins over the mutual one: it is a superset of it.
+    const view = isSuggested ? await suggestedView(l.liker) : isMutual ? await mutualView(l.liker, shared) : await toPublicProfile(l.liker);
+    return { ...view, liked: isMutual, mutual: isMutual, suggested: isSuggested, likedAt: l.createdAt };
   })));
 }));
 
@@ -552,14 +616,17 @@ memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
   ]);
   const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(likes.map(async (l) => {
-    const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId);
-    return { ...(await (isMutual ? mutualView(l.liked, shared) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, suggested: suggested.has(l.likedId), likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId); const isSuggested = suggested.has(l.likedId);
+    const view = isSuggested ? await suggestedView(l.liked) : isMutual ? await mutualView(l.liked, shared) : await toPublicProfile(l.liked);
+    return { ...view, liked: true, mutual: isMutual, suggested: isSuggested, likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
   })));
 }));
 
-/** "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first). */
+/**
+ * "Suggested by Sathsangath": profiles our team hand-picked for this member (newest first).
+ * Every row is shown in full, contact details included — see suggestedView.
+ */
 memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
-  const shared = await sharedWith(me(req));
   const [rows, likes, mutual, intros] = await Promise.all([
     prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, select: { profileId: true, note: true, createdAt: true, profile: { select: mutualSelect } } }),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
@@ -569,7 +636,7 @@ memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const liked = new Set(likes.map((l) => l.likedId)); const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(rows.map(async (r) => {
     const isMutual = mutual.has(r.profileId); const i = byTarget.get(r.profileId);
-    return { ...(await (isMutual ? mutualView(r.profile, shared) : toPublicProfile(r.profile))), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...(await suggestedView(r.profile)), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
   })));
 }));
 

@@ -234,17 +234,18 @@ export async function feedPage(viewerId: string, filters: FeedFilters, page: num
 }
 
 /**
- * One profile, if this viewer is allowed to open it: it is in their feed, or
- * the two of them have liked each other.
+ * One profile, if this viewer is allowed to open it: it is in their feed, the
+ * two of them have liked each other, or our team suggested it to them.
  *
  * EGRESS: a single row. This used to build the viewer's entire feed and then
  * search it in memory, so opening one profile — or liking it — read every
  * approved profile out of the database to answer a question about one of them.
  */
-export async function visibleProfile(viewerId: string, profileId: string, isMutual: boolean): Promise<MutualMember | null> {
-  // A mutual match stays reachable even if our team has since hidden them from
-  // this viewer's feed, which is what the old lookup fell back to.
-  if (isMutual) return prisma.member.findFirst({ where: { id: profileId, status: "APPROVED" }, select: mutualSelect });
+export async function visibleProfile(viewerId: string, profileId: string, bypassFeed: boolean): Promise<MutualMember | null> {
+  // A mutual match — or a profile our team suggested — stays reachable even if
+  // they have since been hidden from this viewer's feed, which is what the old
+  // lookup fell back to. The team put this pair together on purpose.
+  if (bypassFeed) return prisma.member.findFirst({ where: { id: profileId, status: "APPROVED" }, select: mutualSelect });
   const { conditions } = await feedScope(viewerId);
   return prisma.member.findFirst({ where: { AND: [...conditions, { id: profileId }] }, select: mutualSelect });
 }
