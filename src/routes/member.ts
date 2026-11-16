@@ -93,15 +93,19 @@ memberRouter.patch("/fcm-token", wrap(async (req, res) => {
  * Every change a member makes to their own bio data comes with the same confirmation they gave when they
  * registered: they accept the privacy policy and take responsibility for what they upload.
  */
-function requireConsent(body: { consent?: unknown }) {
-  if (body.consent !== true && body.consent !== "true") {
-    throw new HttpError(422, "Please tick the confirmation box to save your changes.", { fields: { consent: "Please tick the box to confirm" } });
-  }
+function requireConsent(req: { body: { consent?: unknown }; get(name: string): string | undefined }) {
+  if (req.body.consent === true || req.body.consent === "true") return;
+  // TEMPORARY: the mobile app has no confirmation box yet, so every save from it
+  // was rejected with a message about a box the member could not see. Until the app
+  // build that ships the box is released, only browser clients (the website, which
+  // does show the box) are held to it. Remove this exemption once that build is out.
+  if (!/Mozilla/i.test(req.get("user-agent") ?? "")) return;
+  throw new HttpError(422, "Please tick the confirmation box to save your changes.", { fields: { consent: "Please tick the box to confirm" } });
 }
 
 // Only contact details are editable by the member. Bio data changes go through the admin.
 memberRouter.patch("/me", wrap(async (req, res) => {
-  requireConsent(req.body);
+  requireConsent(req);
   const d = z.object({
     phone: z.string().transform((v, ctx) => { const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
     email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => null)),
@@ -120,7 +124,7 @@ memberRouter.patch("/me", wrap(async (req, res) => {
 
 // The member replaces their own ID proof. The old file is deleted once the new one is saved.
 memberRouter.put("/id-proof", upload.single("idproof"), wrap(async (req, res) => {
-  requireConsent(req.body);
+  requireConsent(req);
   const file = req.file;
   if (!file) throw new HttpError(422, "Choose the ID proof file to upload.", { fields: { idProof: "Choose a file" } });
   const type = String(req.body.idProofType ?? "").trim().toUpperCase();
@@ -136,7 +140,7 @@ memberRouter.put("/id-proof", upload.single("idproof"), wrap(async (req, res) =>
 
 // All profile fields except fullName are self-editable. Contact/phone changes still go through PATCH /member/me.
 memberRouter.patch("/profile", wrap(async (req, res) => {
-  requireConsent(req.body);
+  requireConsent(req);
   const str = z.string().trim().max(2000).optional();
   const num = z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().optional());
   const clearableCount = z.preprocess(
