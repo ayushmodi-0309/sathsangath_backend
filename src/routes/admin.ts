@@ -33,10 +33,10 @@ adminRouter.get("/dashboard", wrap(async (_req, res) => {
     prisma.member.count({ where: { status: "CORRECTION" } }),
     prisma.member.count({ where: { status: "APPROVED" } }),
     prisma.member.count({ where: { status: "SUSPENDED" } }),
-    prisma.introRequest.count({ where: { status: "NEW" } }),
+    liveIntroductions("NEW").then((r) => r.length),
     prisma.like.count(),
     prisma.contactMessage.count({ where: { handled: false } }),
-    prisma.notification.count({ where: { audience: "ADMIN", read: false } }),
+    liveAdminNotifications({ read: false }).then((r) => r.length),
     prisma.like.findMany({ take: 6, orderBy: { createdAt: "desc" }, include: { liker: { select: { profileCode: true, fullName: true } }, liked: { select: { profileCode: true } } } }),
     prisma.member.findMany({ where: { status: "PENDING" }, take: 6, orderBy: { createdAt: "desc" }, select: { id: true, profileCode: true, fullName: true, gender: true, city: true, createdAt: true } }),
   ]);
@@ -917,24 +917,31 @@ adminRouter.get("/likes", wrap(async (req, res) => {
   ]);
   res.json(pg.envelope(total, await withPhotos(rows, ["liker", "liked"])));
 }));
+/** Introduction requests whose two members still like each other. A withdrawn like makes the request stale, so it is hidden. */
+async function liveIntroductions(status?: string) {
+  const all = await prisma.introRequest.findMany({
+    where: status ? { status } : {}, orderBy: { createdAt: "desc" },
+    include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } } },
+  });
+  const ids = [...new Set(all.flatMap((r) => [r.requesterId, r.targetId]))];
+  const likes = ids.length ? await prisma.like.findMany({ where: { likerId: { in: ids }, likedId: { in: ids } }, select: { likerId: true, likedId: true } }) : [];
+  const has = new Set(likes.map((l) => `${l.likerId}>${l.likedId}`));
+  return all.filter((r) => has.has(`${r.requesterId}>${r.targetId}`) && has.has(`${r.targetId}>${r.requesterId}`));
+}
 adminRouter.get("/introductions", wrap(async (req, res) => {
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const pg = paging(req, 20, { allowedSorts: ["createdAt", "status"] });
-  const where = status ? { status } : {};
-  const [total, rows] = await Promise.all([
-    prisma.introRequest.count({ where }),
-    prisma.introRequest.findMany({
-      where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take,
-      include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true, photoUrl: true, gender: true } } },
-    }),
-  ]);
-  const newCount = await prisma.introRequest.count({ where: { status: "NEW" } });
+  const live = await liveIntroductions(status);
+  const dir = pg.order === "asc" ? 1 : -1;
+  live.sort((x, y) => (pg.sort === "status" ? x.status.localeCompare(y.status) : x.createdAt.getTime() - y.createdAt.getTime()) * dir);
+  const rows = live.slice(pg.skip, pg.skip + pg.take);
+  const newCount = status ? (await liveIntroductions("NEW")).length : live.filter((r) => r.status === "NEW").length;
   const shared = await sharedPairs(rows.flatMap((r) => [r.requesterId, r.targetId]));
   const items = (await withPhotos(rows, ["requester", "target"])).map((r) => {
     const k = pair(r.requesterId, r.targetId);
     return { ...r, contactShared: shared.has(`${k.memberAId}:${k.memberBId}`) };
   });
-  res.json({ ...pg.envelope(total, items), newCount });
+  res.json({ ...pg.envelope(live.length, items), newCount });
 }));
 adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
   const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);
@@ -980,12 +987,23 @@ adminRouter.delete("/announcements/:id", wrap(async (req, res) => {
 }));
 
 // ---------- Admin notifications (mutual likes) ----------
+/** Admin notifications, minus "Mutual like" entries whose pair no longer likes each other (a like was withdrawn). */
+async function liveAdminNotifications(extra: Prisma.NotificationWhereInput = {}) {
+  const all = await prisma.notification.findMany({ where: { audience: "ADMIN", ...extra } });
+  const pairOf = (n: { data: string | null }) => { try { const d = JSON.parse(n.data ?? "{}"); return d.a && d.b ? [d.a as string, d.b as string] as const : null; } catch { return null; } };
+  const mutualRows = all.filter((n) => n.type === "MUTUAL_LIKE");
+  const ids = [...new Set(mutualRows.flatMap((n) => pairOf(n) ?? []))];
+  const likes = ids.length ? await prisma.like.findMany({ where: { likerId: { in: ids }, likedId: { in: ids } }, select: { likerId: true, likedId: true } }) : [];
+  const has = new Set(likes.map((l) => `${l.likerId}>${l.likedId}`));
+  return all.filter((n) => { if (n.type !== "MUTUAL_LIKE") return true; const k = pairOf(n); return !k || (has.has(`${k[0]}>${k[1]}`) && has.has(`${k[1]}>${k[0]}`)); });
+}
 adminRouter.get("/notifications", wrap(async (req, res) => {
   const pg = paging(req, 20, { allowedSorts: ["createdAt", "read"] });
-  const [total, rows] = await Promise.all([
-    prisma.notification.count({ where: { audience: "ADMIN" } }),
-    prisma.notification.findMany({ where: { audience: "ADMIN" }, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take }),
-  ]);
+  const live = await liveAdminNotifications();
+  const dir = pg.order === "asc" ? 1 : -1;
+  live.sort((x, y) => { const a = pg.sort === "read" ? Number(x.read) : x.createdAt.getTime(); const b = pg.sort === "read" ? Number(y.read) : y.createdAt.getTime(); return (a - b) * dir; });
+  const total = live.length;
+  const rows = live.slice(pg.skip, pg.skip + pg.take);
   const ids = [...new Set(rows.flatMap((n) => { try { const d = JSON.parse(n.data ?? "{}"); return [d.a, d.b]; } catch { return []; } }).filter(Boolean))] as string[];
   const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
   const byId = new Map(await Promise.all(people.map(async (p) => [p.id, { ...p, photoUrl: await resolveUrl(p.photoUrl) }] as const)));
@@ -1041,7 +1059,16 @@ adminRouter.get("/audit", wrap(async (req, res) => {
   // ADMIN actor type, so it overrides any ?actor rather than fighting with it.
   const staff = typeof req.query.staff === "string" && req.query.staff ? req.query.staff : "";
   const pg = paging(req, 20, { allowedSorts: ["createdAt", "actorType", "action"] });
-  const where: Prisma.AuditLogWhereInput = staff ? { adminId: staff } : t ? { actorType: t } : {};
+  const base: Prisma.AuditLogWhereInput = staff ? { adminId: staff } : t ? { actorType: t } : {};
+  // ?member=<SS-1234 | name | id> narrows the log to one member: entries they made (memberId) and entries
+  // done to them, e.g. an admin approving their profile or another member liking it (entityId).
+  const mq = typeof req.query.member === "string" ? req.query.member.trim().slice(0, 80) : "";
+  let where = base;
+  if (mq) {
+    const found = await prisma.member.findMany({ where: { OR: [{ id: mq }, { profileCode: { contains: mq, mode: "insensitive" } }, { fullName: { contains: mq, mode: "insensitive" } }] }, select: { id: true }, take: 50 });
+    const ids = found.map((m) => m.id);
+    where = { AND: [base, { OR: [{ memberId: { in: ids } }, { entityId: { in: ids } }] }] };
+  }
   const [total, rows] = await Promise.all([
     prisma.auditLog.count({ where }),
     prisma.auditLog.findMany({ where, orderBy: { [pg.sort]: pg.order } as Record<string, "asc"|"desc">, skip: pg.skip, take: pg.take, include: { admin: { select: { name: true } } } }),

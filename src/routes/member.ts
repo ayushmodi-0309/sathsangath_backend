@@ -17,12 +17,14 @@ import { checkSiblingCounts, ID_PROOF_TYPES, manglikClearable, normalizeVisaType
 import { INCOME_CURRENCIES, incomeFieldsPatch } from "../lib/choices";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
-import { isContactShared, sharedWith } from "../lib/contact-share";
+import { areMutual, isContactShared, pair, sharedWith } from "../lib/contact-share";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
 
 const MAX_PHOTOS = 6;
+/** An introduction request only shows while the pair is still mutual and the request is open: a closed one (withdrawn like) reads as "none", so the member can ask again after liking again. */
+const introView = (i: { status: string } | null | undefined, mutual: boolean) => (i && mutual && i.status !== "CLOSED" ? { status: i.status, label: STATUS_LABEL[i.status] } : null);
 const STATUS_LABEL: Record<string, string> = {
   NEW: "Request received",
   UNDER_REVIEW: "Under review by Sathsangath",
@@ -526,7 +528,7 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
     mutual: isMutual,
     suggested: isSelf ? false : !!sug,
     suggestionNote: isSelf ? null : sug?.note ?? null,
-    introduction: isSelf ? null : activeIntro ? { status: activeIntro.status, label: STATUS_LABEL[activeIntro.status] } : null,
+    introduction: isSelf ? null : introView(activeIntro, isMutual),
   });
 }));
 
@@ -575,8 +577,20 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
 
 memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   const otherId = String(req.params.id);
+  const wasMutual = await areMutual(me(req), otherId);
   const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: otherId } });
   if (r.count) {
+    if (wasMutual) {
+      // The pair is no longer mutual: drop the "match" notifications (staff bell + both members) and any
+      // contact-sharing approval, so each side is back to the public view and a stale entry can't be approved.
+      const mine = me(req);
+      await prisma.notification.deleteMany({ where: { type: "MUTUAL_LIKE", OR: [
+        { audience: "ADMIN", data: { in: [JSON.stringify({ a: mine, b: otherId }), JSON.stringify({ a: otherId, b: mine })] } },
+        { audience: "MEMBER", memberId: mine, data: JSON.stringify({ memberId: otherId }) },
+        { audience: "MEMBER", memberId: otherId, data: JSON.stringify({ memberId: mine }) },
+      ] } });
+      await prisma.contactShare.deleteMany({ where: pair(mine, otherId) }).catch(() => {}); // table may not exist yet
+    }
     const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { id: true, profileCode: true, fullName: true } });
     await activity(who(m), "REMOVED_LIKE", "Member", otherId);
     // Close any open intro requests between the two members (mutual access revoked)
@@ -622,7 +636,7 @@ memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
   res.json(await Promise.all(likes.map(async (l) => {
     const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId); const isSuggested = suggested.has(l.likedId);
     const view = isSuggested ? await suggestedView(l.liked) : isMutual ? await mutualView(l.liked, shared) : await toPublicProfile(l.liked);
-    return { ...view, liked: true, mutual: isMutual, suggested: isSuggested, likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...view, liked: true, mutual: isMutual, suggested: isSuggested, likedAt: l.createdAt, introduction: introView(i, isMutual) };
   })));
 }));
 
@@ -640,7 +654,7 @@ memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const liked = new Set(likes.map((l) => l.likedId)); const byTarget = new Map(intros.map((i) => [i.targetId, i]));
   res.json(await Promise.all(rows.map(async (r) => {
     const isMutual = mutual.has(r.profileId); const i = byTarget.get(r.profileId);
-    return { ...(await suggestedView(r.profile)), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+    return { ...(await suggestedView(r.profile)), liked: liked.has(r.profileId), mutual: isMutual, suggested: true, suggestionNote: r.note, suggestedAt: r.createdAt, introduction: introView(i, isMutual) };
   })));
 }));
 
