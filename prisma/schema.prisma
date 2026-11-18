@@ -113,6 +113,7 @@ model Member {
 
   // --- partner preferences (comma separated lists) ---
   prefCommunities    String   @default("")
+  prefSubCommunities String   @default("")
   prefCities         String   @default("")
   prefEducation      String   @default("")
   prefOccupation     String   @default("")

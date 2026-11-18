@@ -234,7 +234,7 @@ const intakeBase = z.object({
   // value is dropped: see where `siblings` is stripped before the create below. DEPRECATIONS.md
   // says when this can go.
   siblings: opt,
-  prefCommunities: arr.optional(), prefCities: arr.optional(),
+  prefCommunities: arr.optional(), prefSubCommunities: arr.optional(), prefCities: arr.optional(),
   prefEducation: arr.optional(), prefOccupation: arr.optional(), prefCountries: arr.optional(),
   prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
   prefIncomeMin: optionalIncome,
@@ -304,7 +304,7 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, ...rest } = input;
+  const { consent, prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, ...rest } = input;
   // Closed lists: an off-list value is folded to "Other" rather than refused, so an older client
   // can still submit, and the column keeps only values the feed filters can offer.
   rest.education = coerceEducation(rest.education) ?? undefined;
@@ -341,7 +341,7 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
       ...rest, dob: new Date(dob), dobIsApproximate: dobIsApproximate ?? false, source, consentGiven: consent,
       ...(rest.country && rest.country !== "IN" && visaType && { visaType }),
       profileCode: await nextProfileCode(),
-      prefCommunities: prefCommunitiesClean.join(","), prefCities: (prefCities ?? []).join(","),
+      prefCommunities: prefCommunitiesClean.join(","), prefSubCommunities: (prefSubCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
       prefEducation: (prefEducation ?? []).join(","), prefOccupation: (prefOccupation ?? []).join(","),
       prefCountries: (prefCountries ?? []).join(","),
       ...fileFields, ...(photoList[0] && { photoUrl: photoList[0] }),

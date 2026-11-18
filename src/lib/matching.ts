@@ -5,6 +5,7 @@ import { mutualSelect, publicSelect, type MutualMember, type PublicMember } from
 import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, INCOME_RANGES_BY_CURRENCY, incomeAtLeast } from "./choices";
 import { ALL_COUNTRIES } from "./countries-data";
 import { INDIA } from "./locations";
+import { communityAdminList } from "./community";
 
 /** Member + tags + photos + plans: the whole record, for the admin portal and a member's own account. */
 export const includeTags = {
@@ -381,6 +382,7 @@ export async function filterOptionsFor(viewerId: string) {
     ["maritalStatus", "education", "profession", "diet", "community",
       "subCommunity", "motherTongue", "familyType", "nativePlace"].map((f) => byField[f]);
 
+  const adminCommunities = new Set(await communityAdminList());
   const location = locationFacets(places);
   const { cities, states, districts, countries } = location.flat;
 
@@ -389,7 +391,8 @@ export async function filterOptionsFor(viewerId: string) {
     ageMin: range._max.dob ? ageFrom(range._max.dob) : null,
     ageMax: range._min.dob ? ageFrom(range._min.dob) : null,
     heightMin: range._min.heightCm, heightMax: range._max.heightCm,
-    cities, maritalStatuses, educations, professions, diets: dietChoices(feedDiets), communities,
+    // Community is a closed list, so the filter offers only what is on the admin list.
+    cities, maritalStatuses, educations, professions, diets: dietChoices(feedDiets), communities: communities.filter((c) => adminCommunities.has(c)),
     subCommunities, states, motherTongues, familyTypes, nativePlaces,
     districts,
     /**

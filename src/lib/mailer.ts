@@ -25,17 +25,22 @@ export async function verifyMail() { await getTransporter().verify(); }
 /**
  * Sends one HTML email with the brand logo embedded (cid image, so it shows even when the client blocks remote images).
  * Never throws: callers get "sent", "no-address" (nothing on file), "not-configured" (no SMTP credentials)
- * or "failed" (logged). The reason is reported as-is so the admin screen can say why nothing went out.
+ * or "failed". The reason is reported as-is so the admin screen can say why nothing went out.
+ *
+ * Every attempt leaves one line in the log with the recipient address, for audit: sent, failed, skipped
+ * because there was no address, or skipped because SMTP is not configured. Only the subject is logged,
+ * never the body.
  */
 export async function sendMail(opts: { to: string | null | undefined; subject: string; html: string; text: string }): Promise<Delivery> {
-  if (!opts.to) return "no-address";
+  if (!opts.to) { console.log(`[EMAIL skipped: no address] ${opts.subject}`); return "no-address"; }
   if (!mailConfigured()) { console.log(`[EMAIL not configured -> ${opts.to}] ${opts.subject}`); return "not-configured"; }
   try {
-    await getTransporter().sendMail({
+    const info = await getTransporter().sendMail({
       from: { name: config.mail.fromName, address: config.mail.user },
       to: opts.to, subject: opts.subject, html: opts.html, text: opts.text,
       attachments: [{ filename: "sathsangath-logo.png", content: Buffer.from(LOGO_PNG_BASE64, "base64"), cid: LOGO_CID, contentType: "image/png", contentDisposition: "inline" }],
     });
+    console.log(`[EMAIL sent -> ${opts.to}] ${opts.subject} (id ${info.messageId})`);
     return "sent";
   } catch (e) {
     console.error(`[EMAIL failed -> ${opts.to}] ${(e as Error).message}`);

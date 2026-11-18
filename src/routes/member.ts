@@ -152,7 +152,9 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   );
   const arr = z.preprocess((v) => {
     if (Array.isArray(v)) return v;
-    if (typeof v === "string" && v.trim()) return v.split(",").map((s) => s.trim()).filter(Boolean);
+    // "" is an explicit clear (the app sends the joined list, which is "" once the last choice is
+    // removed). A key that was not sent at all is undefined here, and leaves the stored list alone.
+    if (typeof v === "string") return v.trim() ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
     return undefined;
   }, z.array(z.string().trim()).optional());
 
@@ -199,10 +201,10 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
       z.enum(INCOME_CURRENCIES, { message: "Choose a currency from the list" }).optional(),
     ),
     prefNotes: str,
-    prefCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
+    prefCommunities: arr, prefSubCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
   // Closed lists. A key that was not sent stays untouched; "" still clears the field.
   if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
   if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
@@ -293,6 +295,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   }
   if (dob) data.dob = new Date(dob);
   if (prefCommunities !== undefined) data.prefCommunities = (await coercePrefCommunities(prefCommunities)).join(",");
+  if (prefSubCommunities !== undefined) data.prefSubCommunities = prefSubCommunities.join(",");
   if (prefCities !== undefined) data.prefCities = prefCities.join(",");
   if (prefEducation !== undefined) data.prefEducation = prefEducation.join(",");
   if (prefOccupation !== undefined) data.prefOccupation = prefOccupation.join(",");

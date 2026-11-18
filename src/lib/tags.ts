@@ -43,7 +43,9 @@ export type TagBackedField = keyof typeof TAG_FIELD_CATEGORIES;
 const FIELDS = Object.keys(TAG_FIELD_CATEGORIES) as TagBackedField[];
 const MAX_VALUE_LEN = 100;
 
-type Fields = Partial<Record<TagBackedField, string | null>>;
+/** `prefSubCommunities` is the comma-separated column: its values feed the Sub-community list too. */
+type Fields = Partial<Record<TagBackedField, string | null>> & { prefSubCommunities?: string | null };
+type Corrections = Partial<Record<TagBackedField | "prefSubCommunities", string>>;
 
 /** Finds a category by name, creating it the first time a value needs it. */
 async function categoryId(name: string): Promise<string> {
@@ -72,8 +74,8 @@ async function categoryId(name: string): Promise<string> {
  * Returns the canonical value for each field that needs correcting, so the caller can store the
  * list's spelling on the member row rather than the variant that was typed.
  */
-export async function learnTagValues(fields: Fields): Promise<Partial<Record<TagBackedField, string>>> {
-  const corrections: Partial<Record<TagBackedField, string>> = {};
+export async function learnTagValues(fields: Fields): Promise<Corrections> {
+  const corrections: Corrections = {};
 
   for (const field of FIELDS) {
     const raw = fields[field];
@@ -95,6 +97,30 @@ export async function learnTagValues(fields: Fields): Promise<Partial<Record<Tag
     // New to the list: add it as typed, and store the tidied form on the member.
     await prisma.tagValue.create({ data: { categoryId: id, value } });
     if (value !== raw) corrections[field] = value;
+  }
+
+  // Preferred sub-communities. A member can type one that is not on the list; like their own
+  // sub-community it is added, so the next person finds it. Each is stored with the list's spelling.
+  const prefSub = fields.prefSubCommunities;
+  if (typeof prefSub === "string" && prefSub.trim()) {
+    const id = await categoryId(TAG_FIELD_CATEGORIES.subCommunity);
+    const kept: string[] = [];
+    const seen = new Set<string>();
+    for (const piece of prefSub.split(",")) {
+      const value = piece.trim().replace(/\s+/g, " ");
+      if (!value || seen.has(value.toLowerCase())) continue;
+      seen.add(value.toLowerCase());
+      if (value.length > MAX_VALUE_LEN) { kept.push(value); continue; } // kept on the member, not learned
+      const find = () => prisma.tagValue.findFirst({ where: { categoryId: id, value: { equals: value, mode: "insensitive" } }, select: { value: true } });
+      let match = await find();
+      if (!match) {
+        try { match = await prisma.tagValue.create({ data: { categoryId: id, value }, select: { value: true } }); }
+        catch { match = await find(); } // another request added it first
+      }
+      kept.push(match?.value ?? value);
+    }
+    const joined = kept.join(",");
+    if (joined !== prefSub) corrections.prefSubCommunities = joined;
   }
 
   return corrections;

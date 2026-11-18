@@ -353,7 +353,7 @@ const editSchema = z.object({
   familyType: clearableChoice(FAMILY_TYPES),
   nativePlace: clearableText, prefHeightMinCm: intEdit(120, 250),
   prefMaritalStatus: clearableChoice(MARITAL_STATUSES), prefRelocate: clearableChoice(RELOCATE),
-  prefCommunities: prefList, prefCities: prefList,
+  prefCommunities: prefList, prefSubCommunities: prefList, prefCities: prefList,
   prefEducation: prefList, prefOccupation: prefList, prefCountries: prefList,
   prefIncomeMin: clearableIncome, prefIncomeCurrency: optionalCurrency,
   visaType: clearableText, visaExpiry: clearableText,
@@ -418,7 +418,7 @@ async function locationPatch(
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const id = pid(req.params.id);
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = editSchema.parse(req.body);
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = editSchema.parse(req.body);
   // The office types these in too, so the same rule applies: a married count cannot exceed the
   // total, and does not stand on its own.
   const siblingIssues: Record<string, string> = {};
@@ -454,6 +454,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
       ...incomePatch.patch,
       ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
       ...(prefCommunitiesClean !== undefined && { prefCommunities: prefCommunitiesClean.join(",") }),
+      ...(prefSubCommunities !== undefined && { prefSubCommunities: prefSubCommunities.join(",") }),
       ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
       ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
       ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),
@@ -493,7 +494,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   } else if (body.dob) {
     dobIsApproximate = false;
   }
-  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = fullEditSchema.parse(body);
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = fullEditSchema.parse(body);
   // The office types these in too, so the same rule applies: a married count cannot exceed the
   // total, and does not stand on its own.
   const siblingIssues: Record<string, string> = {};
@@ -547,6 +548,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
         ...(dobIsApproximate !== undefined && { dobIsApproximate }),
         ...(country && { country }),
         ...(prefCommunitiesClean !== undefined && { prefCommunities: prefCommunitiesClean.join(",") }),
+        ...(prefSubCommunities !== undefined && { prefSubCommunities: prefSubCommunities.join(",") }),
         ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
         ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
         ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),
@@ -559,6 +561,8 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
       include: includeTags,
     });
     if (uploadedPhotoUrls.length) await syncMainPhoto(m.id);
+    // Same as the quick edit: a value typed here that is not on a dropdown yet joins that list.
+    await learnTagValuesFor(m.id, m);
     await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
     res.json(await toAdminMember(uploadedPhotoUrls.length ? await prisma.member.findUniqueOrThrow({ where: { id: m.id }, include: includeTags }) : m));
   } catch (e) {
