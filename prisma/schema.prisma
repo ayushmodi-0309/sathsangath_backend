@@ -67,6 +67,10 @@ model Member {
   maritalStatus      String?
   community          String?
   subCommunity       String?
+  // Backup of the two above from before Community became a closed list. Never read or written by
+  // the app; declared here only so `prisma db push` does not drop them. See sql/add-community-old.sql.
+  communityOld       String?
+  subCommunityOld    String?
   city               String?
   // India only: the district `city` sits in, and the level the feed filters on. Required for India
   // when a member edits their own profile; cleared, with state and city, for every other country.

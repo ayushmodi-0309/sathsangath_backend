@@ -25,7 +25,8 @@ import { prisma } from "./db";
  * Validation is tightened, and the existing values mapped, as a later step.
  */
 export const TAG_FIELD_CATEGORIES = {
-  community: "Community",
+  // `community` is no longer learned: it is a closed, admin-managed list, and a value that is not
+  // on it is folded by lib/community.ts (list, then mapping, then "Other") before it is stored.
   subCommunity: "Sub-community",
   // `city` used to be learned here. It is now the town level of the closed Country → State →
   // District → City/Town list in lib/locations.ts, for the reason given above: the feed facets are
