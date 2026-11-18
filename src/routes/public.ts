@@ -7,6 +7,7 @@ import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
+import { getAppVersion, isPlatform } from "../lib/app-version";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
 import { rateLimit } from "express-rate-limit";
 import { removeObject, saveUpload } from "../lib/storage";
@@ -435,6 +436,13 @@ publicRouter.get("/locations", geoLimiter, wrap(async (req, res) => {
   res.set("Cache-Control", "public, max-age=86400");
   res.set("ETag", `W/"geo-${INDIA_LOCATIONS_VERSION}-${state ?? (full ? "full" : "admin")}"`);
   res.json(body);
+}));
+
+/** Update gate for the mobile apps: compares by build number. See lib/app-version.ts. */
+publicRouter.get("/app-version", wrap(async (req, res) => {
+  if (!isPlatform(req.query.platform)) throw new HttpError(422, "platform must be android or ios.");
+  res.set("Cache-Control", "public, max-age=60");
+  res.json(await getAppVersion(req.query.platform));
 }));
 
 publicRouter.get("/tags", wrap(async (_req, res) => {
