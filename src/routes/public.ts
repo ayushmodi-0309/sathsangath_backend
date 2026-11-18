@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../lib/db";
 import { learnTagValuesFor } from "../lib/tags";
 import { coerceEducation, coerceProfession } from "../lib/closed-lists";
+import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
@@ -308,6 +309,9 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
   // can still submit, and the column keeps only values the feed filters can offer.
   rest.education = coerceEducation(rest.education) ?? undefined;
   rest.profession = coerceProfession(rest.profession) ?? undefined;
+  // Community is a closed, admin-managed list: on the list, else the mapping, else "Other".
+  rest.community = (await coerceCommunity(rest.community)) ?? undefined;
+  const prefCommunitiesClean = await coercePrefCommunities(prefCommunities ?? []);
   const visaType = normalizeVisaType(rawVisaType);
   // Living outside India: the visa or status is required when people register themselves. Admin
   // entry may leave it empty (the office often does not have it yet).
@@ -337,7 +341,7 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
       ...rest, dob: new Date(dob), dobIsApproximate: dobIsApproximate ?? false, source, consentGiven: consent,
       ...(rest.country && rest.country !== "IN" && visaType && { visaType }),
       profileCode: await nextProfileCode(),
-      prefCommunities: (prefCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
+      prefCommunities: prefCommunitiesClean.join(","), prefCities: (prefCities ?? []).join(","),
       prefEducation: (prefEducation ?? []).join(","), prefOccupation: (prefOccupation ?? []).join(","),
       prefCountries: (prefCountries ?? []).join(","),
       ...fileFields, ...(photoList[0] && { photoUrl: photoList[0] }),

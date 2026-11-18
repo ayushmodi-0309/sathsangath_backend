@@ -9,6 +9,7 @@ import { isOwner, normaliseRole, OWNER_ROLE, requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { adminListSelect, toAdminListItem, toAdminMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
+import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { audit, tempPassword } from "../lib/util";
 import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
@@ -433,6 +434,9 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const incomePatch = incomeFieldsPatch({ income, incomeCurrency, prefIncomeMin, prefIncomeCurrency }, existing);
   if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
   if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
+  // Community is a closed, admin-managed list: on the list, else the mapping, else "Other".
+  if (d.community !== undefined) d.community = await coerceCommunity(d.community);
+  const prefCommunitiesClean = prefCommunities !== undefined ? await coercePrefCommunities(prefCommunities) : undefined;
   // This route carries no country field, so the number's own +dialcode decides it (else India).
   for (const field of ["phone", "familyPhone"] as const) {
     const raw = d[field];
@@ -449,7 +453,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
       ...place,
       ...incomePatch.patch,
       ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
-      ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
+      ...(prefCommunitiesClean !== undefined && { prefCommunities: prefCommunitiesClean.join(",") }),
       ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
       ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
       ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),
@@ -500,6 +504,9 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   void _age;
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
   if (typeof d.visaType === "string") d.visaType = normalizeVisaType(d.visaType);
+  // Community is a closed, admin-managed list: on the list, else the mapping, else "Other".
+  if (d.community !== undefined) d.community = await coerceCommunity(d.community);
+  const prefCommunitiesClean = prefCommunities !== undefined ? await coercePrefCommunities(prefCommunities) : undefined;
   // Normalise both numbers before they are written. Falls back to the member's residence country
   // when the form did not say which country the number was typed under.
   const residence = await prisma.member.findUniqueOrThrow({
@@ -539,7 +546,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
         ...(dob !== undefined && { dob: new Date(dob) }),
         ...(dobIsApproximate !== undefined && { dobIsApproximate }),
         ...(country && { country }),
-        ...(prefCommunities !== undefined && { prefCommunities: prefCommunities.join(",") }),
+        ...(prefCommunitiesClean !== undefined && { prefCommunities: prefCommunitiesClean.join(",") }),
         ...(prefCities !== undefined && { prefCities: prefCities.join(",") }),
         ...(prefEducation !== undefined && { prefEducation: prefEducation.join(",") }),
         ...(prefOccupation !== undefined && { prefOccupation: prefOccupation.join(",") }),

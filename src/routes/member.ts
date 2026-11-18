@@ -8,6 +8,7 @@ import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, vis
 import { mutualSelect, toMutualProfile, toPublicProfile, toSelf, type MutualMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { coerceEducation, coerceProfession } from "../lib/closed-lists";
+import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone, isPlaceholderPhone } from "../lib/phone";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
@@ -205,6 +206,8 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   // Closed lists. A key that was not sent stays untouched; "" still clears the field.
   if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
   if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
+  // Community: on the admin list, else the mapping, else "Other". "" still clears it.
+  if (rest.community) rest.community = (await coerceCommunity(rest.community)) ?? "";
 
   const member = await loadMe(me(req));
   // "3 of my 2 brothers are married" has to be refused here too, not only on the public form.
@@ -289,7 +292,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     }
   }
   if (dob) data.dob = new Date(dob);
-  if (prefCommunities !== undefined) data.prefCommunities = prefCommunities.join(",");
+  if (prefCommunities !== undefined) data.prefCommunities = (await coercePrefCommunities(prefCommunities)).join(",");
   if (prefCities !== undefined) data.prefCities = prefCities.join(",");
   if (prefEducation !== undefined) data.prefEducation = prefEducation.join(",");
   if (prefOccupation !== undefined) data.prefOccupation = prefOccupation.join(",");
