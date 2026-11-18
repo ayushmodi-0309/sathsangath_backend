@@ -5,7 +5,7 @@ import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireApproved, requireMember } from "../lib/auth";
 import { feedPage, filterOptionsFor, includeTags, mutualIds, suggestionsFor, visibleProfile } from "../lib/matching";
-import { mutualSelect, toMutualProfile, toPublicProfile, toSelf, type MutualMember } from "../lib/serializers";
+import { mutualSelect, toMutualProfile, toPublicProfile, toPublicProfileDetail, toSelf, type MutualMember } from "../lib/serializers";
 import { learnTagValuesFor } from "../lib/tags";
 import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { coerceCommunity, coercePrefCommunities } from "../lib/community";
@@ -523,7 +523,8 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   // numbers between the families. What our team suggesting the profile unlocks
   // is in suggestedView — that is the team's own decision, not an automatic one.
   const revealFull = isMutual || isSelf || isSuggested;
-  const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfile(p);
+  // Partner preferences are public on a profile opened on its own, so the short shape carries them too.
+  const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfileDetail(p);
   // Mobile number and email after our team approves this pair (admin: Likes & requests,
   // Mutual likes), or straight away on a profile our team suggested to this member.
   const contactApproved = !isSelf && (isSuggested || (isMutual && (await isContactShared(viewerId, p.id))));

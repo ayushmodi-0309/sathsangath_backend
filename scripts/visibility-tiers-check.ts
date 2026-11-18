@@ -7,9 +7,11 @@
  * supposed to be in:
  *
  *   TIER 1  public       — every approved member sees this. Age, height, education, profession,
- *                          community, city, diet, Manglik, family background, one photo.
+ *                          community, city, diet, Manglik, family background, one photo. On a profile
+ *                          opened on its own it also carries the partner preferences (not the feed
+ *                          or the Interests lists, which only need the card).
  *   TIER 2  mutual       — both members liked each other. Adds date of birth, religion, parents'
- *                          names, income and partner preferences, and every photo.
+ *                          names, income and every photo.
  *                          Still NO name, NO mobile number, NO email.
  *   TIER 3  contact      — tier 2 plus the name, mobile number and email. Two ways in, both of
  *                          them our team's own decision: a mutual pair our team approved for
@@ -194,7 +196,7 @@ async function seed() {
 // ── Tier rules ────────────────────────────────────────────────────────────────
 
 /** Fields only a tier-2-or-better viewer may receive. Every fixture has all of them set. */
-const TIER2_FIELDS = ["dob", "religion", "fatherName", "motherName", "income", "prefs"] as const;
+const TIER2_FIELDS = ["dob", "religion", "fatherName", "motherName", "income"] as const;
 /** Fields only a tier-3 viewer may receive. */
 const TIER3_FIELDS = ["fullName", "contact"] as const;
 
@@ -207,7 +209,12 @@ const fail = (where: string, what: string) => problems.push({ where, what });
 const has = (o: Record<string, unknown>, k: string) => o[k] !== undefined && o[k] !== null;
 
 /** Judges one profile object against the tier that pair is supposed to be in. */
-function checkTier(where: string, body: Record<string, unknown>, tier: Tier) {
+function checkTier(where: string, body: Record<string, unknown>, tier: Tier, detail = false) {
+  // Partner preferences are public on a profile opened on its own (`detail`), at every tier, and
+  // are left out of lists and the feed, which only need the card.
+  if (detail && !has(body, "prefs")) fail(where, `a profile opened on its own should carry "prefs" at every tier and it is missing`);
+  if (!detail && tier === 1 && has(body, "prefs")) fail(where, `a tier 1 list or feed row must not carry "prefs"`);
+  if (!detail && tier > 1 && !has(body, "prefs")) fail(where, `tier ${tier} should carry "prefs" and it is missing`);
   // Tier 2 data: present from tier 2 up, absent at tier 1.
   for (const f of TIER2_FIELDS) {
     if (tier === 1 && has(body, f)) fail(where, `tier 1 must not carry "${f}" (got ${JSON.stringify(body[f])?.slice(0, 60)})`);
@@ -319,7 +326,7 @@ async function main() {
     const r = await get(`/member/profiles/${e.who.id}`, V.id);
     const where = `profiles/${tag}`;
     if (r.status !== 200) { fail(where, `expected 200, got ${r.status} (${JSON.stringify(r.body)})`); continue; }
-    checkTier(where, r.body, e.tier);
+    checkTier(where, r.body, e.tier, true);
     sweep(where, r.body, e.who, e.tier === 3);
     console.log(`  ${tag} (${e.why.padEnd(58)}) -> tier ${e.tier} ${problems.some((p) => p.where === where) ? "FAILED" : "ok"}`);
   }
