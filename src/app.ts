@@ -19,11 +19,24 @@ const corsOptions: cors.CorsOptions = {
   origin: (o, cb) => cb(null, !o || config.corsOrigins.includes(o)),
   credentials: false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-App-Platform", "X-App-Version", "X-App-Build"],
   maxAge: 86400,
 };
 app.use(cors(corsOptions));
-app.use(morgan("tiny", {
+// Which client made the call, as explicit fields: " platform=ios version=1.1.2 build=10" or " platform=web".
+// Each field appears only when the client sent it, so calls from older app builds log exactly as before.
+// The values are client-supplied, so they are trimmed to a safe alphabet before they reach the log.
+const clean = (v: unknown) => String(Array.isArray(v) ? v[0] : v ?? "").replace(/[^\w.+-]/g, "").slice(0, 24);
+morgan.token("client", (req) => {
+  const fields: [string, string][] = [
+    ["platform", clean(req.headers["x-app-platform"])],
+    ["version", clean(req.headers["x-app-version"])],
+    ["build", clean(req.headers["x-app-build"])],
+  ];
+  // Morgan prints "-" for an empty token, so a blank stands in when the client sent nothing.
+  return fields.filter(([, v]) => v).map(([k, v]) => ` ${k}=${v}`).join("") || " ";
+});
+app.use(morgan(":method :url :status :res[content-length] - :response-time ms:client", {
   stream: { write: (line) => logger.info(line.trim(), { source: "http" }) },
 }));
 app.use(express.json({ limit: "1mb" }));

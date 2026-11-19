@@ -47,7 +47,7 @@ export const mutualSelect = {
   photos: { orderBy: photoOrder },
   fullName: true, phone: true, email: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
   income: true, incomeCurrency: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
-  prefRelocate: true, prefCommunities: true, prefCities: true, prefEducation: true,
+  prefRelocate: true, prefCommunities: true, prefSubCommunities: true, prefCities: true, prefEducation: true,
   prefOccupation: true, prefCountries: true, prefIncomeMin: true, prefIncomeCurrency: true, prefNotes: true,
 } satisfies Prisma.MemberSelect;
 
@@ -143,9 +143,27 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
 }
 
 /**
+ * Partner preferences. PUBLIC on a profile opened on its own: any approved member who opens a
+ * profile sees what that person is looking for, liked or not — see toPublicProfileDetail. They are
+ * not in the feed or in the Interests lists, which only need the card (EGRESS: thirteen columns a
+ * list would read for nothing).
+ */
+const prefsOf = (m: MutualMember) => ({
+  ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
+  communities: list(m.prefCommunities), subCommunities: list(m.prefSubCommunities), cities: list(m.prefCities),
+  education: list(m.prefEducation), occupation: list(m.prefOccupation),
+  countries: list(m.prefCountries), incomeMin: m.prefIncomeMin, incomeCurrency: m.prefIncomeCurrency, notes: m.prefNotes,
+});
+
+/** The public shape for ONE profile opened on its own: toPublicProfile plus the partner preferences. */
+export async function toPublicProfileDetail(m: MutualMember) {
+  return { ...(await toPublicProfile(m)), prefs: prefsOf(m) };
+}
+
+/**
  * After BOTH members have liked each other the other side also sees the
  * date of birth, religion, parents' names and income. (Country is public —
- * see toPublicProfile.)
+ * see toPublicProfile; partner preferences are public too — see toPublicProfileDetail.)
  * Phone, email and family contacts still stay private: only the admin shares those.
  */
 export const toMutualProfile = async (m: MutualMember) => ({
@@ -156,12 +174,7 @@ export const toMutualProfile = async (m: MutualMember) => ({
   motherName: m.motherName,
   income: m.income, // revealed only after a mutual like, and deliberately not filterable
   incomeCurrency: m.incomeCurrency,
-  prefs: {
-    ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
-    communities: list(m.prefCommunities), cities: list(m.prefCities),
-    education: list(m.prefEducation), occupation: list(m.prefOccupation),
-    countries: list(m.prefCountries), incomeMin: m.prefIncomeMin, incomeCurrency: m.prefIncomeCurrency, notes: m.prefNotes,
-  },
+  prefs: prefsOf(m),
 });
 
 /*
@@ -221,7 +234,7 @@ export async function toSelf(m: FullMember) {
     // only handed over for the statuses where it was written for the member.
     adminNote: m.status === "CORRECTION" || m.status === "REJECTED" ? m.adminNote : null,
     prefs: {
-      communities: list(m.prefCommunities), cities: list(m.prefCities),
+      communities: list(m.prefCommunities), subCommunities: list(m.prefSubCommunities), cities: list(m.prefCities),
       education: list(m.prefEducation), occupation: list(m.prefOccupation),
       countries: list(m.prefCountries), ageMin: m.prefAgeMin, ageMax: m.prefAgeMax, incomeMin: m.prefIncomeMin, incomeCurrency: m.prefIncomeCurrency,
       notes: m.prefNotes, minHeightCm: m.prefHeightMinCm, maritalStatus: m.prefMaritalStatus, relocate: m.prefRelocate,
@@ -267,7 +280,7 @@ export async function toAdminMember(m: FullMember) {
   const ap = activePlan(m.membershipPlans ?? []);
   return {
     ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
-    prefCommunities: list(m.prefCommunities), prefCities: list(m.prefCities),
+    prefCommunities: list(m.prefCommunities), prefSubCommunities: list(m.prefSubCommunities), prefCities: list(m.prefCities),
     prefEducation: list(m.prefEducation), prefOccupation: list(m.prefOccupation),
     prefCountries: list(m.prefCountries), prefIncomeMin: m.prefIncomeMin,
     tags: (m.tags ?? []).map((t) => ({ id: t.tagValueId, value: t.tagValue.value, category: t.tagValue.category.name })),
