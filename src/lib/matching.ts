@@ -141,7 +141,7 @@ const ORDER: Record<NonNullable<FeedFilters["sort"]>, Prisma.MemberOrderByWithRe
  * The overrides are a correlated `none` rather than a fetched id list, so no
  * override row ever crosses the wire.
  */
-async function feedScope(viewerId: string) {
+async function feedScope(viewerId: string, opts: { includeNotInterested?: boolean } = {}) {
   const viewer = await prisma.member.findUniqueOrThrow({ where: { id: viewerId }, select: { gender: true, city: true, district: true } });
   const conditions: Prisma.MemberWhereInput[] = [
     { status: "APPROVED" },
@@ -149,6 +149,9 @@ async function feedScope(viewerId: string) {
     { gender: viewer.gender === "MALE" ? "FEMALE" : "MALE" },
     { overridesAsProfile: { none: { viewerId, action: "HIDE" } } },
   ];
+  // Profiles the viewer marked "not interested" stay out of the feed, its filter counts and the code
+  // search. Opening one by link still works (visibleProfile opts in) so the mark can be undone.
+  if (!opts.includeNotInterested) conditions.push({ notInterestedBy: { none: { memberId: viewerId } } });
   return { conditions, viewerPlace: { district: viewer.district, city: viewer.city } };
 }
 
@@ -247,8 +250,14 @@ export async function visibleProfile(viewerId: string, profileId: string, bypass
   // they have since been hidden from this viewer's feed, which is what the old
   // lookup fell back to. The team put this pair together on purpose.
   if (bypassFeed) return prisma.member.findFirst({ where: { id: profileId, status: "APPROVED" }, select: mutualSelect });
-  const { conditions } = await feedScope(viewerId);
+  const { conditions } = await feedScope(viewerId, { includeNotInterested: true });
   return prisma.member.findFirst({ where: { AND: [...conditions, { id: profileId }] }, select: mutualSelect });
+}
+
+/** Ids of the profiles this member marked "not interested". */
+export async function notInterestedIds(memberId: string) {
+  const rows = await prisma.notInterested.findMany({ where: { memberId }, select: { profileId: true } });
+  return new Set(rows.map((r) => r.profileId));
 }
 
 /** Ids of the profiles our team suggested to this member. */

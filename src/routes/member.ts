@@ -513,8 +513,9 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   } else {
     ({ p, isMutual } = await loadVisible(viewerId, profileId, isSuggested));
   }
-  const [like, introByMe, introByThem] = await Promise.all([
+  const [like, notInterested, introByMe, introByThem] = await Promise.all([
     prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } }),
+    isSelf ? null : prisma.notInterested.findUnique({ where: { memberId_profileId: { memberId: me(req), profileId: p.id } }, select: { id: true } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: p.id, targetId: me(req) } } }),
   ]);
@@ -532,6 +533,7 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
     ...serialized,
     ...(!isSelf && (isMutual || isSuggested) ? { contactApproved, contact: contactApproved ? contactOf(p) : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
     liked: isSelf ? false : !!like,
+    notInterested: !!notInterested,
     mutual: isMutual,
     suggested: isSelf ? false : !!sug,
     suggestionNote: isSelf ? null : sug?.note ?? null,
@@ -544,6 +546,8 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
   const { p } = await loadVisible(me(req), String(req.params.id));
   const existing = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } });
   let mutual = false;
+  // Showing interest in someone undoes an earlier "not interested" mark.
+  await prisma.notInterested.deleteMany({ where: { memberId: me(req), profileId: p.id } });
   if (!existing) {
     await prisma.like.create({ data: { likerId: me(req), likedId: p.id } });
     const [meRow, them] = await Promise.all([
@@ -582,43 +586,91 @@ memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
   res.json({ liked: true, mutual });
 }));
 
+/**
+ * The pair is no longer mutual (or never will be): drop the "match" notifications (staff bell + both
+ * members) and any contact-sharing approval, so each side is back to the public view and a stale
+ * entry can't be approved, and close any open intro requests between them.
+ * Silent: nobody is notified.
+ */
+async function endMatch(mine: string, otherId: string, wasMutual: boolean) {
+  if (wasMutual) {
+    await prisma.notification.deleteMany({ where: { type: "MUTUAL_LIKE", OR: [
+      { audience: "ADMIN", data: { in: [JSON.stringify({ a: mine, b: otherId }), JSON.stringify({ a: otherId, b: mine })] } },
+      { audience: "MEMBER", memberId: mine, data: JSON.stringify({ memberId: otherId }) },
+      { audience: "MEMBER", memberId: otherId, data: JSON.stringify({ memberId: mine }) },
+    ] } });
+    await prisma.contactShare.deleteMany({ where: pair(mine, otherId) }).catch(() => {}); // table may not exist yet
+  }
+  await prisma.introRequest.updateMany({
+    where: {
+      OR: [
+        { requesterId: mine, targetId: otherId },
+        { requesterId: otherId, targetId: mine },
+      ],
+      status: { not: "CLOSED" },
+    },
+    data: { status: "CLOSED" },
+  });
+}
+
 memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   const otherId = String(req.params.id);
   const wasMutual = await areMutual(me(req), otherId);
   const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: otherId } });
   if (r.count) {
-    if (wasMutual) {
-      // The pair is no longer mutual: drop the "match" notifications (staff bell + both members) and any
-      // contact-sharing approval, so each side is back to the public view and a stale entry can't be approved.
-      const mine = me(req);
-      await prisma.notification.deleteMany({ where: { type: "MUTUAL_LIKE", OR: [
-        { audience: "ADMIN", data: { in: [JSON.stringify({ a: mine, b: otherId }), JSON.stringify({ a: otherId, b: mine })] } },
-        { audience: "MEMBER", memberId: mine, data: JSON.stringify({ memberId: otherId }) },
-        { audience: "MEMBER", memberId: otherId, data: JSON.stringify({ memberId: mine }) },
-      ] } });
-      await prisma.contactShare.deleteMany({ where: pair(mine, otherId) }).catch(() => {}); // table may not exist yet
-    }
+    await endMatch(me(req), otherId, wasMutual);
     const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { id: true, profileCode: true, fullName: true } });
     await activity(who(m), "REMOVED_LIKE", "Member", otherId);
-    // Close any open intro requests between the two members (mutual access revoked)
-    await prisma.introRequest.updateMany({
-      where: {
-        OR: [
-          { requesterId: me(req), targetId: otherId },
-          { requesterId: otherId, targetId: me(req) },
-        ],
-        status: { not: "CLOSED" },
-      },
-      data: { status: "CLOSED" },
-    });
   }
   res.json({ liked: false });
+}));
+
+// ---------- Not interested ----------
+// Private to the member (and staff). The other person is never told: no notification row, push, email or SMS.
+memberRouter.put("/not-interested/:id", requireApproved, wrap(async (req, res) => {
+  const mine = me(req);
+  const { p } = await loadVisible(mine, String(req.params.id));
+  const [wasMutual, myLike] = await Promise.all([
+    areMutual(mine, p.id),
+    prisma.like.findUnique({ where: { likerId_likedId: { likerId: mine, likedId: p.id } }, select: { id: true } }),
+  ]);
+  await prisma.notInterested.upsert({
+    where: { memberId_profileId: { memberId: mine, profileId: p.id } },
+    create: { memberId: mine, profileId: p.id },
+    update: {},
+  });
+  // Not interested replaces a like: drop mine, and break the match / intro if there was one.
+  if (myLike) await prisma.like.delete({ where: { id: myLike.id } });
+  if (myLike || wasMutual) await endMatch(mine, p.id, wasMutual);
+  const m = await prisma.member.findUniqueOrThrow({ where: { id: mine }, select: { id: true, profileCode: true, fullName: true } });
+  await activity(who(m), "MARKED_NOT_INTERESTED", "Member", p.id, { profile: p.profileCode, removedLike: !!myLike, wasMutual });
+  res.json({ notInterested: true, liked: false, mutual: false });
+}));
+
+memberRouter.delete("/not-interested/:id", requireApproved, wrap(async (req, res) => {
+  const profileId = String(req.params.id);
+  const r = await prisma.notInterested.deleteMany({ where: { memberId: me(req), profileId } });
+  if (r.count) {
+    const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) }, select: { id: true, profileCode: true, fullName: true } });
+    await activity(who(m), "REMOVED_NOT_INTERESTED", "Member", profileId);
+  }
+  res.json({ notInterested: false });
+}));
+
+memberRouter.get("/not-interested", requireApproved, wrap(async (req, res) => {
+  const rows = await prisma.notInterested.findMany({
+    where: { memberId: me(req), profile: { status: "APPROVED" } },
+    select: { createdAt: true, profile: { select: mutualSelect } },
+    orderBy: { createdAt: "desc" },
+  });
+  // Never a mutual or liked profile (marking removes the like), so the public shape is always right.
+  res.json(await Promise.all(rows.map(async (r) => ({ ...(await toPublicProfile(r.profile)), liked: false, mutual: false, suggested: false, notInterested: true, markedAt: r.createdAt }))));
 }));
 
 memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
   const shared = await sharedWith(me(req));
   const [likes, mutual, suggested] = await Promise.all([
-    prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED" } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
+    prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED", notInterestedBy: { none: { memberId: me(req) } } } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
     suggestionsFor(me(req)),
   ]);
@@ -653,7 +705,7 @@ memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
  */
 memberRouter.get("/suggestions", requireApproved, wrap(async (req, res) => {
   const [rows, likes, mutual, intros] = await Promise.all([
-    prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED" } }, orderBy: { createdAt: "desc" }, select: { profileId: true, note: true, createdAt: true, profile: { select: mutualSelect } } }),
+    prisma.suggestion.findMany({ where: { viewerId: me(req), profile: { status: "APPROVED", notInterestedBy: { none: { memberId: me(req) } } } }, orderBy: { createdAt: "desc" }, select: { profileId: true, note: true, createdAt: true, profile: { select: mutualSelect } } }),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
     mutualIds(me(req)),
     prisma.introRequest.findMany({ where: { requesterId: me(req) }, select: { targetId: true, status: true } }),

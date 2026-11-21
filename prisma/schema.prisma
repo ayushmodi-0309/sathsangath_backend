@@ -147,6 +147,8 @@ model Member {
   suggestedTo         Suggestion[] @relation("SuggestionProfile")
   likesGiven         Like[]          @relation("Liker")
   likesReceived      Like[]          @relation("Liked")
+  notInterestedGiven NotInterested[] @relation("NotInterestedBy")
+  notInterestedBy    NotInterested[] @relation("NotInterestedProfile")
   introRequests      IntroRequest[]  @relation("Requester")
   introTargets       IntroRequest[]  @relation("Target")
   overridesAsViewer  VisibilityOverride[] @relation("OverrideViewer")
@@ -210,6 +212,20 @@ model Like {
   liker     Member   @relation("Liker", fields: [likerId], references: [id], onDelete: Cascade)
   liked     Member   @relation("Liked", fields: [likedId], references: [id], onDelete: Cascade)
   @@unique([likerId, likedId])
+}
+
+/// A private "not interested" mark: `memberId` does not want to see `profileId` any more.
+/// Only the member and staff can see it. The marked profile is never told and gets no notification.
+/// It hides the profile from the member's feed; removing the row brings it back.
+model NotInterested {
+  id        String   @id @default(cuid())
+  memberId  String
+  profileId String
+  createdAt DateTime @default(now())
+  member    Member   @relation("NotInterestedBy", fields: [memberId], references: [id], onDelete: Cascade)
+  profile   Member   @relation("NotInterestedProfile", fields: [profileId], references: [id], onDelete: Cascade)
+  @@unique([memberId, profileId])
+  @@index([profileId])
 }
 
 /// Admin approval for two members who liked each other to see each other's mobile number and email.
