@@ -182,13 +182,15 @@ adminRouter.get("/members/:id", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: includeTags });
   if (!m) throw new HttpError(404, "Member not found.");
   const profileSnap = { id: true, profileCode: true, fullName: true, city: true, status: true, photoUrl: true } as const;
-  const [likesGiven, likesReceivedList, intros, introsReceived, overrides, suggestions] = await Promise.all([
+  const [likesGiven, likesReceivedList, intros, introsReceived, overrides, suggestions, notInterestedRows] = await Promise.all([
     prisma.like.findMany({ where: { likerId: m.id }, orderBy: { createdAt: "desc" }, include: { liked: { select: profileSnap } } }),
     prisma.like.findMany({ where: { likedId: m.id }, orderBy: { createdAt: "desc" }, include: { liker: { select: profileSnap } } }),
     prisma.introRequest.findMany({ where: { requesterId: m.id }, orderBy: { createdAt: "desc" }, include: { target: { select: profileSnap } } }),
     prisma.introRequest.findMany({ where: { targetId: m.id }, orderBy: { createdAt: "desc" }, include: { requester: { select: profileSnap } } }),
     prisma.visibilityOverride.findMany({ where: { viewerId: m.id }, include: { profile: { select: { id: true, profileCode: true, fullName: true } } } }),
     prisma.suggestion.findMany({ where: { viewerId: m.id }, orderBy: { createdAt: "desc" }, include: { profile: { select: { id: true, profileCode: true, fullName: true, gender: true, city: true, photoUrl: true } } } }),
+    // Profiles this member privately marked "not interested" (the other person is never told).
+    prisma.notInterested.findMany({ where: { memberId: m.id }, orderBy: { createdAt: "desc" }, include: { profile: { select: profileSnap } } }),
   ]);
   // Compute "liked back" flags for each suggestion without N+1 queries
   const sugProfileIds = suggestions.map((s) => s.profileId);
@@ -209,14 +211,15 @@ adminRouter.get("/members/:id", wrap(async (req, res) => {
     if (!u) { u = resolveUrl(p.photoUrl); signed.set(p.photoUrl, u); }
     return { ...p, photoUrl: await u };
   };
-  const [gaveTo, gotFrom, introsOut, introsIn, sugOut] = await Promise.all([
+  const [gaveTo, gotFrom, introsOut, introsIn, sugOut, notInterestedGiven] = await Promise.all([
     Promise.all(likesGiven.map(async (l) => ({ ...l, liked: await snap(l.liked) }))),
     Promise.all(likesReceivedList.map(async (l) => ({ ...l, liker: await snap(l.liker) }))),
     Promise.all(intros.map(async (i) => ({ ...i, target: await snap(i.target) }))),
     Promise.all(introsReceived.map(async (i) => ({ ...i, requester: await snap(i.requester) }))),
     Promise.all(suggestionsWithFlags.map(async (s) => ({ ...s, profile: (await snap(s.profile))! }))),
+    Promise.all(notInterestedRows.map(async (n) => ({ ...n, profile: await snap(n.profile) }))),
   ]);
-  res.json({ ...(await toAdminMember(m)), likesGiven: gaveTo, likesReceivedList: gotFrom, likesReceived: gotFrom.length, intros: introsOut, introsReceived: introsIn, overrides, suggestions: sugOut });
+  res.json({ ...(await toAdminMember(m)), likesGiven: gaveTo, likesReceivedList: gotFrom, likesReceived: gotFrom.length, intros: introsOut, introsReceived: introsIn, overrides, suggestions: sugOut, notInterestedGiven });
 }));
 
 // Manual entry by admin (walk-in / phone enquiry): same fields and file rules as the public form, lands as PENDING.

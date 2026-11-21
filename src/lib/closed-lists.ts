@@ -20,7 +20,7 @@
 
 import { prisma } from "./db";
 import { EDUCATION_OTHER, EDUCATION_VALUES, educationEntry } from "./education";
-import { PROFESSION_OTHER, PROFESSIONS, professionEntry } from "./profession";
+import { PROFESSION_OTHER, PROFESSIONS, legacyProfession, professionEntry } from "./profession";
 
 /** The tag categories these lists own, by the name used in `TagCategory.name`. */
 export const CLOSED_LIST_CATEGORIES = {
@@ -67,7 +67,9 @@ export const coerceEducation = (v?: string | null): string | null => {
 
 export const coerceProfession = (v?: string | null): string | null => {
   if (typeof v !== "string" || !v.trim()) return null;
-  return professionEntry(v) ?? PROFESSION_LOOSE.get(norm(v)) ?? PROFESSION_OTHER;
+  // The old 22-value list is tried before "Other": an older app build, or a member who has not been
+  // migrated yet, still sends "Doctor / Medical" or "Private Job", and that must not become "Other".
+  return professionEntry(v) ?? legacyProfession(v) ?? PROFESSION_LOOSE.get(norm(v)) ?? PROFESSION_OTHER;
 };
 
 /** How many values had to be dropped from each loose index as ambiguous. Exported for the tests. */
