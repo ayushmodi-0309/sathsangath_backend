@@ -81,6 +81,40 @@ export const manglikClearable = z.preprocess(
   (v) => (v === "" || v === null ? null : foldManglik(v)),
   z.enum(MANGLIK_VALUES, { message: "Choose Yes or No for Manglik" }).nullable().optional());
 
+/**
+ * Disability. Optional and sensitive: absent or blank means "No disability", which is also what
+ * every existing member reads as. The status says when it began, the nature (any of several) says
+ * what kind. The nature only means anything alongside a disability, so it is cleared otherwise.
+ */
+export const NO_DISABILITY = "No disability";
+export const DISABILITY_STATUSES = [NO_DISABILITY, "Since birth", "Due to an accident"] as const;
+export const DISABILITY_NATURES = ["Mobility", "Hearing", "Vision", "Speech", "Other"] as const;
+
+/** Blank is "not sent" here; the caller decides what not-sent means (default on create, unchanged on edit). */
+export const disabilityStatusField = z.preprocess(
+  (v) => (v === "" || v == null ? undefined : typeof v === "string" ? v.trim() : v),
+  z.enum(DISABILITY_STATUSES, { message: "Choose a disability option from the list" }).optional());
+
+/** Array or comma-separated string in; known values only, de-duplicated, in list order. "" = []. */
+export const disabilityNatureField = z.preprocess((v) => {
+  if (v == null) return undefined;
+  if (Array.isArray(v)) return v.map((x) => String(x).trim());
+  if (typeof v === "string") return v.trim() ? v.split(",").map((x) => x.trim()) : [];
+  return undefined;
+}, z.array(z.string()).optional().transform((a) => a && DISABILITY_NATURES.filter((n) => a.includes(n))));
+
+/**
+ * Prisma fields for a write. `stored` is the member's current status (an edit); omit it on create.
+ * Nothing sent => nothing changes. A "No disability" status, sent or already stored, clears the
+ * nature so the two never disagree.
+ */
+export function disabilityData(status: string | undefined, nature: string[] | undefined, stored?: string | null) {
+  if (status === undefined && nature === undefined) return {};
+  const effective = status ?? stored ?? NO_DISABILITY;
+  if (effective === NO_DISABILITY) return { ...(status !== undefined && { disability: status }), disabilityNature: "" };
+  return { ...(status !== undefined && { disability: status }), ...(nature !== undefined && { disabilityNature: nature.join(",") }) };
+}
+
 /** Kinds of visa / residence status for members living outside India. "Citizen" has no expiry date. */
 export const VISA_TYPES = ["Citizen", "Permanent resident (PR / Green card)", "H-1B visa", "Work visa (other)", "Student visa", "Dependent / spouse visa (H-4 etc.)", "Business visa", "Visitor visa", "Other"] as const;
 /**
@@ -191,6 +225,37 @@ export function checkSiblingCounts(v: SiblingCounts, addIssue: (path: string, me
   }
 }
 
+/** Marital statuses for which the optional Children section is offered (and stored). */
+export const CHILDREN_STATUSES: readonly string[] = ["Divorced", "Widowed", "Awaiting divorce"];
+
+/**
+ * Children of a divorced / widowed member: 0..10 of { gender, age in years }. Entirely optional.
+ * Arrives as a JSON array (web form, app) or a JSON string (multipart admin forms). Absent =
+ * "not sent"; [] = "none". Half-filled rows are dropped rather than refused: it is an optional field.
+ */
+export const childrenField = z.preprocess((v) => {
+  if (v === "" || v == null) return undefined;
+  if (typeof v === "string") { try { return JSON.parse(v); } catch { return undefined; } }
+  return v;
+}, z.array(z.object({
+  gender: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(["MALE", "FEMALE"])),
+  age: z.preprocess((v) => (v === "" || v == null ? undefined : Number(v)), z.number().int().min(0).max(25)),
+}).partial()).max(10, "Add 10 children or fewer").optional()
+  .transform((a) => a?.filter((c): c is { gender: "MALE" | "FEMALE"; age: number } => c.gender != null && c.age != null)));
+
+/**
+ * Prisma nested write for an edit. `children` undefined = not sent (leave alone), [] = clear,
+ * a list = replace all. If the edit moves the status to one without the section (Never married),
+ * the stored children are cleared too. Returns undefined when nothing should change.
+ */
+export function childrenPatch(children: ChildInput[] | undefined, maritalStatus: string | undefined) {
+  if (maritalStatus !== undefined && !CHILDREN_STATUSES.includes(maritalStatus)) return { children: { deleteMany: {} } };
+  if (children === undefined) return undefined;
+  return { children: { deleteMany: {}, ...(children.length ? { create: children } : {}) } };
+}
+
+export type ChildInput = { gender: "MALE" | "FEMALE"; age: number };
+
 export const weightKgField = z.preprocess(
   (v) => (v === "" || v == null ? undefined : Number(v)),
   z.number("Enter the weight in kilograms").int("Enter the weight in whole kilograms").min(30, "Enter a weight of 30 kg or more").max(250, "Enter a weight of 250 kg or less").optional(),
@@ -222,6 +287,7 @@ const intakeBase = z.object({
   weightKg: weightKgField,
   birthTime: birthTimeField, birthPlace: opt,
   manglik: manglikField,
+  disability: disabilityStatusField, disabilityNature: disabilityNatureField,
   // Both web forms mark marital status required, so the API requires it too.
   maritalStatus: z.string().trim().min(1, "Select marital status").pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   community: opt, subCommunity: opt, city: opt, state: opt, district: opt, nativePlace: opt,
@@ -231,6 +297,7 @@ const intakeBase = z.object({
   diet: oneOfList(DIETS, "Choose a diet from the list"),
   fatherOccupation: opt, motherOccupation: opt, familyBackground: opt, about: opt,
   ...siblingFields,
+  children: childrenField,
   // Retired, and still accepted so an older app build submits without a validation error. The
   // value is dropped: see where `siblings` is stripped before the create below. DEPRECATIONS.md
   // says when this can go.
@@ -305,7 +372,7 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
-  const { consent, prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, ...rest } = input;
+  const { consent, prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, visaType: rawVisaType, visaExpiry, siblings: _retiredSiblings, children, disability, disabilityNature, ...rest } = input;
   // Closed lists: an off-list value is folded to "Other" rather than refused, so an older client
   // can still submit, and the column keeps only values the feed filters can offer.
   rest.education = coerceEducation(rest.education) ?? undefined;
@@ -347,6 +414,9 @@ export async function createSubmission(input: z.infer<typeof intakeSchema>, sour
       prefCountries: (prefCountries ?? []).join(","),
       ...fileFields, ...(photoList[0] && { photoUrl: photoList[0] }),
       ...(accountId && { accountId, mustChangePassword: false }), // self-signup members never get an admin-issued temp password
+      // Optional children, only kept for statuses where the section is offered.
+      ...disabilityData(disability ?? NO_DISABILITY, disabilityNature),
+      ...(children?.length && CHILDREN_STATUSES.includes(rest.maritalStatus) && { children: { create: children } }),
       ...(photoList.length && { photos: { create: photoList.map((url, i) => ({ url, isMain: i === 0 })) } }),
     },
   });

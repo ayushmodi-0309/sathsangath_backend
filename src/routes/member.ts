@@ -14,7 +14,7 @@ import { checkAnyPhone, isPlaceholderPhone } from "../lib/phone";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
-import { checkSiblingCounts, ID_PROOF_TYPES, manglikClearable, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
+import { checkSiblingCounts, childrenField, childrenPatch, CHILDREN_STATUSES, disabilityData, disabilityNatureField, disabilityStatusField, ID_PROOF_TYPES, manglikClearable, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
 import { INCOME_CURRENCIES, incomeFieldsPatch } from "../lib/choices";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
@@ -168,6 +168,8 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     // Optional: "" clears it, a missing key leaves it alone, and an older app build that never
     // sends it is unaffected.
     manglik: manglikClearable,
+    // Optional and sensitive. A missing key leaves it alone; "No disability" also clears the nature.
+    disability: disabilityStatusField, disabilityNature: disabilityNatureField,
     community: str, subCommunity: str,
     // Place of living, a closed cascade: see lib/locations.ts. "" clears, a missing key leaves it
     // alone. An app build that predates the district still sends only city + state; its city is
@@ -192,6 +194,8 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     brothers: clearableCount, brothersMarried: clearableCount,
     sisters: clearableCount, sistersMarried: clearableCount,
     siblings: str,
+    // Optional children of a divorced / widowed member; absent = unchanged, [] = clear.
+    children: childrenField,
     familyType: str, familyBackground: str,
     prefAgeMin: num, prefAgeMax: num, prefHeightMinCm: num,
     prefMaritalStatus: str, prefRelocate: str,
@@ -204,7 +208,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     prefCommunities: arr, prefSubCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...rest } = d;
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, children, disability, disabilityNature, ...rest } = d;
   // Closed lists. A key that was not sent stays untouched; "" still clears the field.
   if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
   if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
@@ -242,6 +246,10 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   // into a country it does not belong to; only values sent in this request are kept.
   const touchedPlace = country !== undefined || state !== undefined || district !== undefined || city !== undefined;
   const data: Record<string, unknown> = { ...rest, ...incomePatch.patch };
+  // Children are kept only while the (new or stored) status offers the section.
+  const effectiveStatus = rest.maritalStatus ?? member.maritalStatus ?? "";
+  Object.assign(data, disabilityData(disability, disabilityNature, member.disability));
+  Object.assign(data, childrenPatch(CHILDREN_STATUSES.includes(effectiveStatus) ? children : undefined, rest.maritalStatus));
   if (country !== undefined) data.country = nextCountry;
 
   if (touchedPlace) {

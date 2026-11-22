@@ -1,6 +1,6 @@
 -- Moves existing members' profession onto the new two-level list.
 --
--- Source of truth: profession-mapping.csv (179 members). Every new value is a role in
+-- Source of truth: profession-mapping.csv (151 members to change; regenerated 2026-11-21 after the API deploy). Every new value is a role in
 -- sathsangath_*/lib/profession.ts; the group is derived in code and is NOT stored.
 --
 -- Safe to re-run, and safe against edits made since the mapping was written:
@@ -103,6 +103,7 @@ WITH map("profileCode", old_profession, new_profession, basis) AS (VALUES
   ('SS-2009', 'Business / Entrepreneur', 'Business Owner / Entrepreneur', 'Auto'),
   ('SS-2010', 'Business / Entrepreneur', 'Business Owner / Entrepreneur', 'Auto'),
   ('SS-2028', 'Business / Entrepreneur', 'Business Owner / Entrepreneur', 'Auto'),
+  ('SS-2055', 'Business / Entrepreneur', 'Business Owner / Entrepreneur', 'Auto'),
   ('SS-1906', 'Bussiness', 'Business Owner / Entrepreneur', 'Auto'),
   ('SS-1151', 'Education / Teaching', 'Education / Training Professional', 'Auto'),
   ('SS-1413', 'Education / Teaching', 'Education / Training Professional', 'Auto'),
@@ -130,13 +131,7 @@ WITH map("profileCode", old_profession, new_profession, basis) AS (VALUES
   ('SS-2016', 'Engineer', 'Engineer (Other)', 'Auto'),
   ('SS-2021', 'Engineer', 'Engineer (Other)', 'Auto'),
   ('SS-2043', 'Engineer', 'Engineer (Other)', 'Auto'),
-  ('SS-1766', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-1768', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-1869', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-1962', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-1965', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-2017', 'Family Business', 'Family Business', 'Auto'),
-  ('SS-2029', 'Family Business', 'Family Business', 'Auto'),
+  ('SS-2057', 'Engineer', 'Engineer (Other)', 'Auto'),
   ('SS-1969', 'Government Job', 'Government Employee (Other)', 'Auto'),
   ('SS-2011', 'Government Job', 'Government Employee (Other)', 'Auto'),
   ('SS-2053', 'Government Job', 'Government Employee (Other)', 'Auto'),
@@ -167,20 +162,6 @@ WITH map("profileCode", old_profession, new_profession, basis) AS (VALUES
   ('SS-2045', 'IT / Software', 'IT Professional (Other)', 'Auto'),
   ('SS-2005', 'Lawyer / Legal', 'Lawyer / Advocate', 'Auto'),
   ('SS-2033', 'Media / Designing', 'Media Professional (Other)', 'Auto'),
-  ('SS-2001', 'Not Working', 'Not Working', 'Auto'),
-  ('SS-2036', 'Not Working', 'Not Working', 'Auto'),
-  ('SS-1718', 'Other', 'Other', 'Auto'),
-  ('SS-1910', 'Other', 'Other', 'Auto'),
-  ('SS-1911', 'Other', 'Other', 'Auto'),
-  ('SS-1940', 'Other', 'Other', 'Auto'),
-  ('SS-1946', 'Other', 'Other', 'Auto'),
-  ('SS-1957', 'Other', 'Other', 'Auto'),
-  ('SS-1964', 'Other', 'Other', 'Auto'),
-  ('SS-1975', 'Other', 'Other', 'Auto'),
-  ('SS-1991', 'Other', 'Other', 'Auto'),
-  ('SS-1997', 'Other', 'Other', 'Auto'),
-  ('SS-2026', 'Other', 'Other', 'Auto'),
-  ('SS-2034', 'Other', 'Other', 'Auto'),
   ('SS-1594', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
   ('SS-1909', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
   ('SS-1916', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
@@ -203,16 +184,7 @@ WITH map("profileCode", old_profession, new_profession, basis) AS (VALUES
   ('SS-2020', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
   ('SS-2031', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
   ('SS-2038', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
-  ('SS-2050', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto'),
-  ('SS-1976', 'Retired', 'Retired', 'Auto'),
-  ('SS-1078', 'Self Employed / Freelancer', 'Self Employed / Freelancer', 'Auto'),
-  ('SS-1738', 'Self Employed / Freelancer', 'Self Employed / Freelancer', 'Auto'),
-  ('SS-1850', 'Student', 'Student', 'Auto'),
-  ('SS-1917', 'Student', 'Student', 'Auto'),
-  ('SS-1941', 'Student', 'Student', 'Auto'),
-  ('SS-1994', 'Student', 'Student', 'Auto'),
-  ('SS-2007', 'Student', 'Student', 'Auto'),
-  ('SS-2023', 'Student', 'Student', 'Auto')
+  ('SS-2050', 'Private Job', 'Private / Corporate Employee (Other)', 'Auto')
 )
 UPDATE "Member" m
 SET profession = map.new_profession

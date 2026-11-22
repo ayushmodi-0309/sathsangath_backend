@@ -16,7 +16,7 @@ import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
-import { checkSiblingCounts, createSubmission, DIETS, FAMILY_TYPES, intakeSchema, manglikClearable, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, normalizeVisaType, RELOCATE } from "./public";
+import { checkSiblingCounts, childrenField, childrenPatch, createSubmission, DIETS, disabilityData, disabilityNatureField, disabilityStatusField, FAMILY_TYPES, intakeSchema, manglikClearable, MARITAL_STATUSES, MAX_PHOTO_BYTES, normaliseBirthTime, normalizeVisaType, RELOCATE } from "./public";
 import { INCOME_CURRENCIES, incomeFieldsPatch, isIncomeCurrency } from "../lib/choices";
 import { removeObject, resolveUrl, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
@@ -337,6 +337,7 @@ const editSchema = z.object({
   maritalStatus: z.string().trim().pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
   manglik: manglikClearable,
+  disability: disabilityStatusField, disabilityNature: disabilityNatureField,
   community: clearableText, subCommunity: clearableText,
   // Place of living. These four are not written straight through: locationPatch() resolves them
   // together against lib/locations.ts, so the office cannot put a town back into the feed facets
@@ -350,6 +351,7 @@ const editSchema = z.object({
   brothers: intEdit(0, 20), brothersMarried: intEdit(0, 20),
   sisters: intEdit(0, 20), sistersMarried: intEdit(0, 20),
   siblings: clearableText,
+  children: childrenField,
   familyBackground: clearableText, about: clearableText, prefAgeMin: intEdit(18, 80), prefAgeMax: intEdit(18, 80),
   prefNotes: clearableText, adminNote: clearableText,
   motherTongue: clearableText, fatherName: clearableText, motherName: clearableText, createdBy: clearableText,
@@ -421,7 +423,7 @@ async function locationPatch(
 
 adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const id = pid(req.params.id);
-  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = editSchema.parse(req.body);
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, children, disability, disabilityNature, ...d } = editSchema.parse(req.body);
   // The office types these in too, so the same rule applies: a married count cannot exceed the
   // total, and does not stand on its own.
   const siblingIssues: Record<string, string> = {};
@@ -432,7 +434,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
   const visaExpiryPatch = visaExpiryValue(visaExpiry);
   const existing = await prisma.member.findUniqueOrThrow({
     where: { id },
-    select: { income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true },
+    select: { income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true, disability: true },
   });
   const incomePatch = incomeFieldsPatch({ income, incomeCurrency, prefIncomeMin, prefIncomeCurrency }, existing);
   if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
@@ -454,6 +456,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     data: {
       ...d,
       ...place,
+      ...childrenPatch(children, d.maritalStatus),
       ...incomePatch.patch,
       ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
       ...(prefCommunitiesClean !== undefined && { prefCommunities: prefCommunitiesClean.join(",") }),
@@ -497,7 +500,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   } else if (body.dob) {
     dobIsApproximate = false;
   }
-  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, ...d } = fullEditSchema.parse(body);
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, age: _age, country, phoneCountry, familyPhoneCountry, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, children, disability, disabilityNature, ...d } = fullEditSchema.parse(body);
   // The office types these in too, so the same rule applies: a married count cannot exceed the
   // total, and does not stand on its own.
   const siblingIssues: Record<string, string> = {};
@@ -515,7 +518,7 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   // when the form did not say which country the number was typed under.
   const residence = await prisma.member.findUniqueOrThrow({
     where: { id },
-    select: { country: true, income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true },
+    select: { country: true, income: true, incomeCurrency: true, prefIncomeMin: true, prefIncomeCurrency: true, disability: true },
   });
   const incomePatch = incomeFieldsPatch({ income, incomeCurrency, prefIncomeMin, prefIncomeCurrency }, residence);
   if (!incomePatch.ok) throw new HttpError(422, incomePatch.message, { fields: { [incomePatch.field]: incomePatch.message } });
@@ -546,6 +549,8 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
         ...d,
         ...(await locationPatch(id, { country, state: d.state, district: d.district, city: d.city })),
         ...incomePatch.patch,
+        ...childrenPatch(children, d.maritalStatus),
+        ...disabilityData(disability, disabilityNature, residence.disability),
         ...(visaExpiryPatch !== undefined && { visaExpiry: visaExpiryPatch }),
         ...(dob !== undefined && { dob: new Date(dob) }),
         ...(dobIsApproximate !== undefined && { dobIsApproximate }),

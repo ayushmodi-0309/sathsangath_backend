@@ -62,6 +62,12 @@ model Member {
   // about directly rather than raw horoscope data. Null means not answered, which is not the same
   // as "No" — plenty of profiles simply leave it blank.
   manglik            String?
+  // Disability: "No disability" (the default, and what every existing member reads as) |
+  // "Since birth" | "Due to an accident". The nature is a comma-separated subset of Mobility,
+  // Hearing, Vision, Speech, Other, and only kept while the status is not "No disability".
+  // Public like the marital status, but "No disability" is never displayed. See prisma/sql/add-disability.sql.
+  disability         String   @default("No disability")
+  disabilityNature   String   @default("")
   heightCm           Int?
   weightKg           Int?
   maritalStatus      String?
@@ -143,6 +149,7 @@ model Member {
 
   tags               MemberTag[]
   photos             Photo[]
+  children           MemberChild[]
   suggestionsReceived Suggestion[] @relation("SuggestionViewer")
   suggestedTo         Suggestion[] @relation("SuggestionProfile")
   likesGiven         Like[]          @relation("Liker")
@@ -289,6 +296,17 @@ model Photo {
   memberId  String
   url       String
   isMain    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  @@index([memberId])
+}
+
+/// A child of a divorced / widowed member. Optional, 0..n per member. See prisma/sql/add-member-children.sql.
+model MemberChild {
+  id        String   @id @default(cuid())
+  memberId  String
+  gender    String   // "MALE" | "FEMALE" (same as Member.gender)
+  age       Int      // years; 0 = under one
   createdAt DateTime @default(now())
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
   @@index([memberId])
