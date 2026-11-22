@@ -11,6 +11,7 @@ import { communityAdminList } from "./community";
 export const includeTags = {
   tags: { include: { tagValue: { include: { category: true } } } },
   photos: { orderBy: [{ isMain: "desc" as const }, { createdAt: "asc" as const }] },
+  children: { select: { gender: true, age: true }, orderBy: { createdAt: "asc" as const } },
   membershipPlans: { orderBy: { startDate: "desc" as const } }, // all plans: activePlan() picks the one running today (an open-ended plan has no end date)
 };
 

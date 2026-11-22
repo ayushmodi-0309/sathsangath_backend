@@ -21,7 +21,7 @@ const photoOrder = [{ isMain: "desc" as const }, { createdAt: "asc" as const }];
  */
 const publicFields = {
   id: true, profileCode: true, gender: true, dob: true, heightCm: true, weightKg: true,
-  maritalStatus: true, manglik: true, community: true, subCommunity: true, city: true, state: true, district: true,
+  maritalStatus: true, manglik: true, disability: true, disabilityNature: true, community: true, subCommunity: true, city: true, state: true, district: true,
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
   brothers: true, brothersMarried: true, sisters: true, sistersMarried: true,
   familyBackground: true, about: true, photoUrl: true, motherTongue: true,
@@ -45,6 +45,9 @@ export const publicSelect = {
 export const mutualSelect = {
   ...publicFields,
   photos: { orderBy: photoOrder },
+  // Optional children of a divorced / widowed member. Only on a profile opened on its own, not the
+  // feed rows: a card does not show them.
+  children: { select: { gender: true, age: true }, orderBy: { createdAt: "asc" as const } },
   fullName: true, phone: true, email: true, dobIsApproximate: true, religion: true, fatherName: true, motherName: true,
   income: true, incomeCurrency: true, prefAgeMin: true, prefAgeMax: true, prefHeightMinCm: true, prefMaritalStatus: true,
   prefRelocate: true, prefCommunities: true, prefSubCommunities: true, prefCities: true, prefEducation: true,
@@ -103,6 +106,11 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     weightKg: m.weightKg,
     maritalStatus: m.maritalStatus,
     manglik: m.manglik,
+    // Public, like the marital status. "No disability" is the default and is never displayed: the
+    // summary is null for it, so a client that prints the summary prints nothing for most members.
+    disability: m.disability,
+    disabilityNature: list(m.disabilityNature),
+    disabilitySummary: disabilitySummary(m.disability, m.disabilityNature),
     community: m.community,
     subCommunity: m.subCommunity,
     city: m.city,
@@ -119,6 +127,10 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     sisters: m.sisters,
     sistersMarried: m.sistersMarried,
     siblingsSummary: siblingsSummary(m),
+    // Public like the siblings next to it. Present on profile views and a member's own account;
+    // feed cards are fetched without them and get [] / null.
+    children: childrenOf(m),
+    childrenSummary: childrenSummary(childrenOf(m)),
     familyBackground: m.familyBackground,
     about: m.about,
     photoUrl: await resolveUrl(m.photoUrl),
@@ -215,6 +227,30 @@ export function siblingsSummary(m: {
   return parts.length ? parts.join(", ") : "No brothers or sisters";
 }
 
+/**
+ * "Disability since birth · Mobility, Hearing". Built here so every client words it the same way,
+ * and null for "No disability" so nothing is shown for the default. Deliberately plain wording.
+ */
+export function disabilitySummary(status: string | null | undefined, nature: string | null | undefined): string | null {
+  if (!status || status === "No disability") return null;
+  const head = status === "Due to an accident" ? "Disability due to an accident" : "Disability since birth";
+  const kinds = list(nature);
+  return kinds.length ? `${head} · ${kinds.join(", ")}` : head;
+}
+
+type ChildRow = { gender: string; age: number };
+const childrenOf = (m: unknown): ChildRow[] => ((m as { children?: ChildRow[] }).children ?? []).map((c) => ({ gender: c.gender, age: c.age }));
+
+/**
+ * "2 children: a son (8), a daughter (5)". Built here so every client prints the same sentence.
+ * Null when there are none.
+ */
+export function childrenSummary(children: ChildRow[]): string | null {
+  if (!children.length) return null;
+  const parts = children.map((c) => `${c.gender === "MALE" ? "a son" : "a daughter"} (${c.age === 0 ? "under 1" : c.age})`);
+  return `${children.length} ${children.length === 1 ? "child" : "children"}: ${parts.join(", ")}`;
+}
+
 /** A member's own account: includes their own contact details, never admin notes. */
 export async function toSelf(m: FullMember) {
   const ap = activePlan(m.membershipPlans ?? []);
@@ -279,7 +315,8 @@ export async function toAdminMember(m: FullMember) {
   const { passwordHash, idProofUrl, ...rest } = m;
   const ap = activePlan(m.membershipPlans ?? []);
   return {
-    ...rest, age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
+    ...rest, disabilityNature: list(m.disabilityNature), disabilitySummary: disabilitySummary(m.disability, m.disabilityNature),
+    age: ageFrom(m.dob), hasPassword: !!passwordHash, hasIdProof: !!idProofUrl, photoUrl: await resolveUrl(m.photoUrl), photos: await toPhotos(m),
     prefCommunities: list(m.prefCommunities), prefSubCommunities: list(m.prefSubCommunities), prefCities: list(m.prefCities),
     prefEducation: list(m.prefEducation), prefOccupation: list(m.prefOccupation),
     prefCountries: list(m.prefCountries), prefIncomeMin: m.prefIncomeMin,

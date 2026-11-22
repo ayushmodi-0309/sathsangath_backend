@@ -13,7 +13,8 @@
  *
  * A mirror of `sathsangath_frontend/lib/profession.ts` — separate repositories, so the data is
  * duplicated rather than imported, and the two must stay identical. This copy seeds the Profession
- * tag category and decides whether a submitted value is on the list.
+ * tag category and decides whether a submitted value is on the list. The frontend copy also carries
+ * search `keywords` per group; those are UI-only and deliberately left out here.
  */
 
 export type ProfessionGroup = { group: string; roles: string[] };
