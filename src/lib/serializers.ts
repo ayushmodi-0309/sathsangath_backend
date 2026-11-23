@@ -21,11 +21,7 @@ const photoOrder = [{ isMain: "desc" as const }, { createdAt: "asc" as const }];
  */
 const publicFields = {
   id: true, profileCode: true, gender: true, dob: true, heightCm: true, weightKg: true,
-<<<<<<< Updated upstream
   maritalStatus: true, manglik: true, disability: true, disabilityNature: true, community: true, subCommunity: true, city: true, state: true, district: true,
-=======
-  maritalStatus: true, disability: true, disabilityNature: true, community: true, subCommunity: true, city: true, state: true, district: true,
->>>>>>> Stashed changes
   education: true, profession: true, diet: true, fatherOccupation: true, motherOccupation: true,
   brothers: true, brothersMarried: true, sisters: true, sistersMarried: true,
   familyBackground: true, about: true, photoUrl: true, motherTongue: true,
@@ -118,7 +114,6 @@ export async function toPublicProfile(m: PublicMember, allPhotos = false) {
     community: m.community,
     subCommunity: m.subCommunity,
     city: m.city,
-    district: m.district,
     state: m.state,
     // India only, and public like the city already is: the feed filters on it.
     district: m.district,

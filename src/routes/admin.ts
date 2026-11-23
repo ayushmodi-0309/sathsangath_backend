@@ -12,7 +12,6 @@ import { learnTagValuesFor } from "../lib/tags";
 import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { audit, tempPassword } from "../lib/util";
-import { resolveLocation } from "../lib/locations";
 import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
@@ -337,7 +336,6 @@ const editSchema = z.object({
   gender: z.enum(["MALE", "FEMALE"]), heightCm: intEdit(120, 250),
   maritalStatus: z.string().trim().pipe(z.enum(MARITAL_STATUSES, { message: "Select marital status" })),
   weightKg: intEdit(30, 250), birthTime: birthTimeEdit, birthPlace: clearableText,
-<<<<<<< Updated upstream
   manglik: manglikClearable,
   disability: disabilityStatusField, disabilityNature: disabilityNatureField,
   community: clearableText, subCommunity: clearableText,
@@ -345,9 +343,6 @@ const editSchema = z.object({
   // together against lib/locations.ts, so the office cannot put a town back into the feed facets
   // that the member pickers do not offer.
   city: clearableText, state: clearableText, district: clearableText,
-=======
-  community: clearableText, subCommunity: clearableText, city: clearableText, state: clearableText, district: clearableText,
->>>>>>> Stashed changes
   education: clearableText, profession: clearableText,
   income: clearableIncome, incomeCurrency: optionalCurrency, diet: clearableChoice(DIETS),
   fatherOccupation: clearableText, motherOccupation: clearableText,
@@ -534,12 +529,6 @@ adminRouter.put("/members/:id", adminUpload.fields([{ name: "photo", maxCount: 3
   if (typeof d.familyPhone === "string" && d.familyPhone.trim()) {
     d.familyPhone = normalisedPhone(d.familyPhone, isCountry(familyPhoneCountry) ? familyPhoneCountry : isCountry(phoneCountry) ? phoneCountry : home, "familyPhone");
   }
-  // India: when a district is sent, the state → district → town lists decide what is stored (an unlisted town is dropped).
-  if (typeof d.district === "string" && d.district.trim() && (country ?? residence.country ?? "IN") === "IN") {
-    const r = resolveLocation({ country: "IN", state: typeof d.state === "string" ? d.state : undefined, district: d.district, city: typeof d.city === "string" ? d.city : undefined });
-    if (!r.ok) throw new HttpError(422, r.message, { fields: { [r.field]: r.message } });
-    d.state = r.value.state; d.district = r.value.district; d.city = r.value.city;
-  } else if (country && country !== "IN") d.district = null;
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
   const newPhotos = f?.photo ?? [];
   const big = newPhotos.find((p) => p.size > MAX_PHOTO_BYTES || !p.mimetype.startsWith("image/"));
