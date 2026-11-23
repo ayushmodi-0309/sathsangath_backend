@@ -18,7 +18,7 @@ import { checkSiblingCounts, childrenField, childrenPatch, CHILDREN_STATUSES, di
 import { INCOME_CURRENCIES, incomeFieldsPatch } from "../lib/choices";
 import { removeObject, saveUpload } from "../lib/storage";
 import { syncMainPhoto } from "../lib/photos";
-import { areMutual, isContactShared, pair, sharedWith } from "../lib/contact-share";
+import { areMutual, hasActivePlan, isContactShared, pair, sharedWith } from "../lib/contact-share";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
@@ -536,10 +536,14 @@ memberRouter.get("/profiles/:id", approvedUnlessSelf, wrap(async (req, res) => {
   const serialized = revealFull ? await toMutualProfile(p) : await toPublicProfileDetail(p);
   // Mobile number and email after our team approves this pair (admin: Likes & requests,
   // Mutual likes), or straight away on a profile our team suggested to this member.
-  const contactApproved = !isSelf && (isSuggested || (isMutual && (await isContactShared(viewerId, p.id))));
+  const pairApproved = !isSelf && isMutual && (await isContactShared(viewerId, p.id));
+  // Only a member with a running paid package sees the other side's contact details, even when the pair is approved.
+  const viewerPaid = pairApproved ? await hasActivePlan(viewerId) : false;
+  const contactApproved = !isSelf && (isSuggested || (pairApproved && viewerPaid));
+  const contactLocked = pairApproved && !viewerPaid && !isSuggested;
   res.json({
     ...serialized,
-    ...(!isSelf && (isMutual || isSuggested) ? { contactApproved, contact: contactApproved ? contactOf(p) : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
+    ...(!isSelf && (isMutual || isSuggested) ? { contactApproved, contactLocked, contact: contactApproved ? contactOf(p) : null, ...(contactApproved ? { fullName: p.fullName } : {}) } : {}),
     liked: isSelf ? false : !!like,
     notInterested: !!notInterested,
     mutual: isMutual,
@@ -676,7 +680,7 @@ memberRouter.get("/not-interested", requireApproved, wrap(async (req, res) => {
 }));
 
 memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
-  const shared = await sharedWith(me(req));
+  const shared = (await hasActivePlan(me(req))) ? await sharedWith(me(req)) : new Set<string>(); // free members see no contact details
   const [likes, mutual, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likedId: me(req), liker: { status: "APPROVED", notInterestedBy: { none: { memberId: me(req) } } } }, select: { likerId: true, createdAt: true, liker: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
@@ -692,7 +696,7 @@ memberRouter.get("/likes/received", requireApproved, wrap(async (req, res) => {
 }));
 
 memberRouter.get("/likes", requireApproved, wrap(async (req, res) => {
-  const shared = await sharedWith(me(req));
+  const shared = (await hasActivePlan(me(req))) ? await sharedWith(me(req)) : new Set<string>(); // free members see no contact details
   const [likes, mutual, intros, suggested] = await Promise.all([
     prisma.like.findMany({ where: { likerId: me(req), liked: { status: "APPROVED" } }, select: { likedId: true, createdAt: true, liked: { select: mutualSelect } }, orderBy: { createdAt: "desc" } }),
     mutualIds(me(req)),
