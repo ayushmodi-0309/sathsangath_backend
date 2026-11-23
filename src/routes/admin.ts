@@ -872,9 +872,21 @@ adminRouter.post("/tags/categories", wrap(async (req, res) => {
 adminRouter.delete("/tags/categories/:id", wrap(async (req, res) => { await prisma.tagCategory.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
 adminRouter.post("/tags/values", wrap(async (req, res) => {
   const d = z.object({ categoryId: z.string(), value: z.string().trim().min(1, "Enter a value") }).parse(req.body);
+  // Education and Profession are closed lists owned by the code (lib/education.ts, lib/profession.ts). The forms do not read
+  // values added here, and the server re-syncs these two categories to the code list every time it starts, so a value added
+  // here would be deleted again. Refuse it with a clear reason instead of pretending it worked.
+  const cat = await prisma.tagCategory.findUnique({ where: { id: d.categoryId }, select: { name: true } });
+  if (cat && ["Education", "Profession"].includes(cat.name)) {
+    throw new HttpError(422, `${cat.name} is a fixed list in the system. New values are added by the developer, not here.`);
+  }
   res.status(201).json(await prisma.tagValue.upsert({ where: { categoryId_value: d }, create: d, update: {} }));
 }));
-adminRouter.delete("/tags/values/:id", wrap(async (req, res) => { await prisma.tagValue.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
+adminRouter.delete("/tags/values/:id", wrap(async (req, res) => {
+  const v = await prisma.tagValue.findUnique({ where: { id: pid(req.params.id) }, select: { category: { select: { name: true } } } });
+  if (v && ["Education", "Profession"].includes(v.category.name)) throw new HttpError(422, `${v.category.name} is a fixed list in the system and cannot be edited here.`);
+  await prisma.tagValue.delete({ where: { id: pid(req.params.id) } });
+  res.json({ ok: true });
+}));
 
 adminRouter.put("/members/:id/tags", wrap(async (req, res) => {
   const { tagIds } = z.object({ tagIds: z.array(z.string()) }).parse(req.body);
