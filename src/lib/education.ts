@@ -60,6 +60,7 @@ export const EDUCATION_TAXONOMY: EduGroup[] = [
     degrees: [
       { value: "B.C.A.", level: B },
       { value: "B.Sc Computer Science / IT", level: B },
+      { value: "AI/ML", level: B },
       { value: "M.C.A.", level: M },
       { value: "M.Sc Computer Science / IT", level: M },
       { value: "P.G.D.C.A.", level: M },
