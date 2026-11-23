@@ -10,8 +10,14 @@ import { learnTagValuesFor } from "../lib/tags";
 import { coerceEducation, coerceProfession } from "../lib/closed-lists";
 import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { activity, list, memberLabel } from "../lib/util";
+<<<<<<< Updated upstream
 import { checkAnyPhone, isPlaceholderPhone } from "../lib/phone";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
+=======
+import { checkAnyPhone, isCountry, isPlaceholderPhone } from "../lib/phone";
+import { verifyCity } from "../lib/cities";
+import { resolveLocation } from "../lib/locations";
+>>>>>>> Stashed changes
 import { sendMutualMatch } from "../lib/notify";
 import { sendPush } from "../lib/fcm";
 import { checkSiblingCounts, childrenField, childrenPatch, CHILDREN_STATUSES, disabilityData, disabilityNatureField, disabilityStatusField, ID_PROOF_TYPES, manglikClearable, normalizeVisaType, photoUpload, upload, VISA_TYPES, weightKgField } from "./public";
@@ -171,9 +177,12 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     // Optional and sensitive. A missing key leaves it alone; "No disability" also clears the nature.
     disability: disabilityStatusField, disabilityNature: disabilityNatureField,
     community: str, subCommunity: str,
+<<<<<<< Updated upstream
     // Place of living, a closed cascade: see lib/locations.ts. "" clears, a missing key leaves it
     // alone. An app build that predates the district still sends only city + state; its city is
     // resolved to a district server-side rather than refused.
+=======
+>>>>>>> Stashed changes
     city: clearable, state: clearable, district: clearable, nativePlace: str,
     // Where they live. Any non-empty text is kept, so a country we do not list still saves.
     country: z.string().trim().min(1).max(100).optional(),
@@ -208,12 +217,16 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     prefCommunities: arr, prefSubCommunities: arr, prefCities: arr, prefEducation: arr, prefOccupation: arr, prefCountries: arr,
   }).parse(req.body);
 
-  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, children, disability, disabilityNature, ...rest } = d;
+<<<<<<< Updated upstream
+  const { prefCommunities, prefSubCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, income, incomeCurrency, prefIncomeMin, prefIncomeCurrency, siblings: _retiredSiblings, children, disability, disabilityNature, children, disability, disabilityNature, ...rest } = d;
   // Closed lists. A key that was not sent stays untouched; "" still clears the field.
   if (rest.education !== undefined) rest.education = coerceEducation(rest.education);
   if (rest.profession !== undefined) rest.profession = coerceProfession(rest.profession);
   // Community: on the admin list, else the mapping, else "Other". "" still clears it.
   if (rest.community) rest.community = (await coerceCommunity(rest.community)) ?? "";
+=======
+  const { prefCommunities, prefCities, prefEducation, prefOccupation, prefCountries, dob, city, state, district, country, visaType, visaExpiry, ...rest } = d;
+>>>>>>> Stashed changes
 
   const member = await loadMe(me(req));
   // "3 of my 2 brothers are married" has to be refused here too, not only on the public form.
@@ -240,6 +253,7 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
   const nextCountry = (country ?? member.country ?? "IN").trim() || "IN";
   const countryChanged = country !== undefined && nextCountry !== (member.country || "IN");
 
+<<<<<<< Updated upstream
   // Place of living is resolved as one thing, not field by field: the state, district and town have
   // to agree with each other and with the country, and outside India there is nothing below the
   // country to keep. Moving country drops whatever was stored below it rather than carrying a city
@@ -268,6 +282,37 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     if (district === undefined && city !== undefined && input.city) {
       const legacy = resolveLegacyCity(input.city, input.state);
       if (legacy) input = { ...input, state: legacy.state, district: legacy.district, city: legacy.city };
+=======
+  // A city belongs to a country. Changing country drops a city that was never
+  // re-picked; a city that was sent is checked against the country being saved.
+  let resolvedCity = city, resolvedState = state;
+  let resolvedDistrict: string | null | undefined;
+  // India with a district: the state → district → town lists decide, and an unlisted town is dropped (it is optional).
+  const byDistrict = nextCountry === "IN" && district !== undefined;
+  if (byDistrict) {
+    const r = resolveLocation({ country: "IN", state: state !== undefined ? state : member.state, district, city: city !== undefined ? city : member.city });
+    if (!r.ok) throw new HttpError(422, r.message, { fields: { [r.field]: r.message } });
+    resolvedState = r.value.state; resolvedDistrict = r.value.district; resolvedCity = r.value.city;
+  } else if (nextCountry !== "IN") resolvedDistrict = null;
+  const cityToCheck = city !== undefined ? city : (countryChanged ? member.city : undefined);
+  const stateToCheck = state !== undefined ? state : (countryChanged ? member.state ?? undefined : undefined);
+  if (byDistrict) {
+    // already resolved above
+  } else if (cityToCheck) {
+    if (isCountry(nextCountry)) {
+      const hit = verifyCity(nextCountry, cityToCheck, stateToCheck ?? undefined);
+      if (!hit) {
+        if (city !== undefined) throw new HttpError(422, `We could not find "${cityToCheck}". Please pick a city from the suggestions.`, { fields: { city: `"${cityToCheck}" was not found in our city list.` } });
+        resolvedCity = null; resolvedState = null;
+      } else if (city !== undefined || countryChanged) {
+        resolvedCity = hit.name; resolvedState = hit.state || stateToCheck;
+      }
+    } else if (city !== undefined) {
+      resolvedCity = city;
+      if (state !== undefined) resolvedState = state;
+    } else if (countryChanged) {
+      resolvedCity = null; resolvedState = null;
+>>>>>>> Stashed changes
     }
     // A client that knows about districts has to supply one for India — clearing it is refused —
     // while one that does not send the key at all is left to the legacy path above.
@@ -285,6 +330,15 @@ memberRouter.patch("/profile", wrap(async (req, res) => {
     data.city = place.value.city;
   }
 
+<<<<<<< Updated upstream
+=======
+  const data: Record<string, unknown> = { ...rest };
+  if (country !== undefined) data.country = nextCountry;
+  if (resolvedCity !== undefined) data.city = resolvedCity;
+  if (resolvedState !== undefined) data.state = resolvedState;
+  if (resolvedDistrict !== undefined) data.district = resolvedDistrict;
+
+>>>>>>> Stashed changes
   // Visa is part of living outside India. India clears it. Anywhere else, the
   // status is required. The expiry date is retired — see the note below.
   const touchingResidence = country !== undefined || visaType !== undefined || visaExpiry !== undefined;

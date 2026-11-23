@@ -12,9 +12,14 @@ import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
 import { rateLimit } from "express-rate-limit";
 import { removeObject, saveUpload } from "../lib/storage";
 import { checkPhone, isCountry, type CountryCode } from "../lib/phone";
+<<<<<<< Updated upstream
 import { searchCities } from "../lib/cities";
 import { INDIA_LOCATIONS_VERSION, INDIA_STATE_LIST, districtsOf, resolveLegacyCity, resolveLocation, stateEntry, townsOf } from "../lib/locations";
 import { ALL_COUNTRIES } from "../lib/countries-data";
+=======
+import { searchCities, verifyCity } from "../lib/cities";
+import { resolveLegacyCity, resolveLocation } from "../lib/locations";
+>>>>>>> Stashed changes
 import { sendSubmissionReceived } from "../lib/notify";
 import { DIETS, INCOME_CURRENCIES, INCOME_RANGES, isIncomeBand } from "../lib/choices";
 
@@ -338,6 +343,7 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
   if (v.prefAgeMin != null && v.prefAgeMax != null && v.prefAgeMin > v.prefAgeMax) {
     ctx.addIssue({ code: "custom", path: ["prefAgeMax"], message: "The maximum age must be more than the minimum age" });
   }
+<<<<<<< Updated upstream
   // Place of living, resolved as one thing: see lib/locations.ts. The Google-Form webhook and the
   // bulk imports carry a free-typed city and no district, so a city is folded onto its district
   // rather than refused; `createSubmission` is where the website form is held to having one.
@@ -349,6 +355,28 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
     out.state = place.value.state ?? undefined;
     out.district = place.value.district ?? undefined;
     out.city = place.value.city ?? undefined;
+=======
+  if (country === "IN" && (v.district || v.state || v.city)) {
+    // India: state → district → city/town. A town that is in no list is dropped, not refused: it is optional.
+    // Older app builds send only a typed city, so those go through the compatibility lookup.
+    if (v.district) {
+      const r = resolveLocation({ country, state: v.state, district: v.district, city: v.city });
+      if (!r.ok) ctx.addIssue({ code: "custom", path: [r.field], message: r.message });
+      else { out.state = r.value.state ?? undefined; out.district = r.value.district ?? undefined; out.city = r.value.city ?? undefined; }
+    } else {
+      const legacy = v.city ? resolveLegacyCity(v.city, v.state) : null;
+      if (legacy) { out.state = legacy.state ?? undefined; out.district = legacy.district ?? undefined; out.city = legacy.city ?? undefined; }
+      else if (v.city) {
+        const hit = verifyCity(country, v.city, v.state);
+        if (!hit) ctx.addIssue({ code: "custom", path: ["city"], message: `We could not find "${v.city}" in India. Please pick your city from the suggestions.` });
+        else { out.city = hit.name; out.state = hit.state || v.state; }
+      }
+    }
+  } else if (v.city) {
+    const hit = verifyCity(country, v.city, v.state);
+    if (!hit) ctx.addIssue({ code: "custom", path: ["city"], message: `We could not find "${v.city}" in ${country}. Please pick your city from the suggestions.` });
+    else { out.city = hit.name; out.state = hit.state || v.state; }
+>>>>>>> Stashed changes
   }
   const { phoneCountry, familyPhoneCountry, ...rest } = out;
   void phoneCountry; void familyPhoneCountry;

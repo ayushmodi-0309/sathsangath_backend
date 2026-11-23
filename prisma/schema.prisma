@@ -78,10 +78,14 @@ model Member {
   communityOld       String?
   subCommunityOld    String?
   city               String?
+<<<<<<< Updated upstream
   // India only: the district `city` sits in, and the level the feed filters on. Required for India
   // when a member edits their own profile; cleared, with state and city, for every other country.
   // `city` keeps meaning the town, which is usually smaller — see src/lib/locations.ts.
   district           String?
+=======
+  district           String? // India only: state → district → city/town, see lib/locations.ts
+>>>>>>> Stashed changes
   nativePlace        String?
   country            String   @default("IN") // ISO code of the country they live in
   religion           String   @default("Hindu")
