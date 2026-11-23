@@ -39,3 +39,14 @@ export async function ensureContactShareTable() {
   await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "ContactShare_memberAId_memberBId_key" ON "ContactShare"("memberAId", "memberBId")`);
   await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "ContactShare_memberBId_idx" ON "ContactShare"("memberBId")`);
 }
+
+/**
+ * Whether this member has a paid membership running today. Contact details are shown only to a paid member:
+ * when two members liked each other and our team approved the pair, the one with a package sees the other's
+ * mobile number and email, and a free member does not (they are offered an upgrade instead).
+ */
+export async function hasActivePlan(memberId: string) {
+  const now = new Date();
+  const n = await prisma.membershipPlan.count({ where: { memberId, startDate: { lte: now }, OR: [{ endDate: null }, { endDate: { gte: now } }] } });
+  return n > 0;
+}

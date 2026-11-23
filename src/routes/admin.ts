@@ -12,7 +12,7 @@ import { learnTagValuesFor } from "../lib/tags";
 import { coerceCommunity, coercePrefCommunities } from "../lib/community";
 import { resolveLegacyCity, resolveLocation } from "../lib/locations";
 import { audit, tempPassword } from "../lib/util";
-import { areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
+import { hasActivePlan, areMutual, ensureContactShareTable, isMissingTable, pair } from "../lib/contact-share";
 import { sendApproved, sendCorrection, sendCredentials, sendRejection, sendSuggestion } from "../lib/notify";
 import { config } from "../lib/config";
 import multer from "multer";
@@ -1052,13 +1052,19 @@ adminRouter.post("/mutual/share-contact", wrap(async (req, res) => {
     await save();
   }
   const first = (n: string) => n.split(" ")[0];
+  // Only a member with a running package gets to see the other side's contact details, so only they are told so.
+  const [paidA, paidB] = await Promise.all([hasActivePlan(ma.id), hasActivePlan(mb.id)]);
+  const note = (to: typeof ma, other: typeof ma, paid: boolean) => paid
+    ? { title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(other.fullName)} (${other.profileCode}). Open their profile to see them.`, push: `You can now see ${first(other.fullName)}'s contact details.` }
+    : { title: "Contact sharing approved", body: `Sathsangath approved sharing with ${other.profileCode}. Contact details are available with a paid membership. Ask our team about upgrading.`, push: "Contact details are available with a paid membership." };
+  const forA = note(ma, mb, paidA), forB = note(mb, ma, paidB);
   await prisma.notification.createMany({ data: [
-    { audience: "MEMBER", memberId: ma.id, type: "CONTACT_SHARED", title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(mb.fullName)} (${mb.profileCode}). Open their profile to see them.`, data: JSON.stringify({ memberId: mb.id }) },
-    { audience: "MEMBER", memberId: mb.id, type: "CONTACT_SHARED", title: "Contact details shared", body: `Sathsangath has approved sharing contact details with ${first(ma.fullName)} (${ma.profileCode}). Open their profile to see them.`, data: JSON.stringify({ memberId: ma.id }) },
+    { audience: "MEMBER", memberId: ma.id, type: "CONTACT_SHARED", title: forA.title, body: forA.body, data: JSON.stringify({ memberId: mb.id }) },
+    { audience: "MEMBER", memberId: mb.id, type: "CONTACT_SHARED", title: forB.title, body: forB.body, data: JSON.stringify({ memberId: ma.id }) },
   ] });
   await Promise.all([
-    sendPush(ma.fcmToken, "Contact details shared", `You can now see ${first(mb.fullName)}'s contact details.`, { type: "CONTACT_SHARED", memberId: mb.id }),
-    sendPush(mb.fcmToken, "Contact details shared", `You can now see ${first(ma.fullName)}'s contact details.`, { type: "CONTACT_SHARED", memberId: ma.id }),
+    sendPush(ma.fcmToken, forA.title, forA.push, { type: "CONTACT_SHARED", memberId: mb.id }),
+    sendPush(mb.fcmToken, forB.title, forB.push, { type: "CONTACT_SHARED", memberId: ma.id }),
   ]);
   await audit(adminId(req), "APPROVE_CONTACT_SHARE", "Member", a, { with: b });
   res.json({ ok: true });
