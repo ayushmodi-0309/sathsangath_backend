@@ -1,17 +1,9 @@
 /**
  * Where a member lives: country, and for India state → district → city/town.
  *
-<<<<<<< Updated upstream
  * A mirror of `sathsangath_frontend/lib/locations.ts` — the two live in separate repositories, so
  * this is duplicated rather than imported, exactly as `education.ts` is. Both read the generated
  * `india-locations-data.ts`, which `scripts/generate-india-locations.ts` writes into both repos.
-=======
- * A mirror of `sathsangath_backend/src/lib/locations.ts` — the two live in separate repositories,
- * so this is duplicated rather than imported, exactly as `education.ts` is. Both read the generated
- * `india-locations-data.ts`, which the backend's `scripts/generate-india-locations.ts` writes into
- * both repos. The server copy is the authoritative check; this one drives the pickers and gives
- * the same answer before the request is sent.
->>>>>>> Stashed changes
  *
  * The shape, and why:
  *
